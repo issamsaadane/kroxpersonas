@@ -266,18 +266,47 @@ export default function App() {
 
   // ── Rect for a new pane: pick a free tile-slot so it doesn't overlap ──────
 
-  const nextFrame = (currentCount: number): FrameRect => {
+  const framesIntersect = (a: FrameRect, b: FrameRect): boolean =>
+    !(a.x + a.width  <= b.x ||
+      b.x + b.width  <= a.x ||
+      a.y + a.height <= b.y ||
+      b.y + b.height <= a.y);
+
+  const nextFrame = (): FrameRect => {
     const ws = workspaceRef.current?.getBoundingClientRect();
     const w = Math.max(400, ws?.width  ?? workspaceBounds.width);
     const h = Math.max(300, ws?.height ?? workspaceBounds.height);
-    // Place the new pane as slot #(currentCount) in a grid sized for (currentCount+1) panes.
-    const tiles = tileLayout(currentCount + 1, w, h);
-    const slot = tiles[currentCount] ?? { x: 40, y: 40, width: 900, height: 600 };
+    const existing = panes.map((p) => p.frame);
+
+    // 1) Try the tile slot for N+1 panes — probably free on open 2, 3, 4 …
+    const tiles = tileLayout(panes.length + 1, w, h);
+    for (const tile of tiles) {
+      const cand: FrameRect = {
+        x: Math.max(0, tile.x),
+        y: Math.max(0, tile.y),
+        width:  Math.max(MIN_W, tile.width),
+        height: Math.max(MIN_H, tile.height),
+      };
+      if (!existing.some((e) => framesIntersect(cand, e))) return cand;
+    }
+
+    // 2) Fall back to a cascade offset in the free area.
+    for (let i = 0; i < 20; i++) {
+      const cand: FrameRect = {
+        x: 40 + i * 32,
+        y: 40 + i * 32,
+        width:  Math.min(900, w - 80),
+        height: Math.min(600, h - 80),
+      };
+      if (cand.x + cand.width >= w || cand.y + cand.height >= h) break;
+      if (!existing.some((e) => framesIntersect(cand, e))) return cand;
+    }
+
+    // 3) No free spot; just place at origin. User can drag.
     return {
-      x: Math.max(0, slot.x),
-      y: Math.max(0, slot.y),
-      width:  Math.max(MIN_W, slot.width),
-      height: Math.max(MIN_H, slot.height),
+      x: 0, y: 0,
+      width:  Math.min(900, w),
+      height: Math.min(600, h),
     };
   };
 
@@ -362,7 +391,7 @@ export default function App() {
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
 
-    const frame = nextFrame(panes.length);
+    const frame = nextFrame();
     const newZ = zTop + 1;
     const rect = webviewRect(frame, "fit", { left: ws.left, top: ws.top });
 
@@ -598,6 +627,9 @@ export default function App() {
                 {panes.map((p) => {
                   const info = paneInfo(p.personaId);
                   if (!info) return null;
+                  const others = panes
+                    .filter((q) => q.personaId !== p.personaId)
+                    .map((q) => q.frame);
                   return (
                     <FramedPane
                       key={p.personaId}
@@ -607,6 +639,7 @@ export default function App() {
                       zIndex={p.zIndex}
                       viewport={p.viewport}
                       workspaceBounds={workspaceBounds}
+                      otherFrames={others}
                       onMove={(frame) => handlePaneMove(p.personaId, frame)}
                       onFocus={() => handlePaneFocus(p.personaId)}
                       onClose={() => handlePaneClose(p.personaId)}

@@ -21,10 +21,23 @@ interface Props {
   zIndex: number;
   viewport: Viewport;
   workspaceBounds: { width: number; height: number };
+  /** Frames of every OTHER pane — used for snap + overlap prevention. */
+  otherFrames: FrameRect[];
   onMove: (rect: FrameRect) => void;
   onFocus: () => void;
   onClose: () => void;
   onSetViewport: (v: Viewport) => void;
+}
+
+const SNAP = 8;
+
+function intersects(a: FrameRect, b: FrameRect): boolean {
+  return !(
+    a.x + a.width  <= b.x ||
+    b.x + b.width  <= a.x ||
+    a.y + a.height <= b.y ||
+    b.y + b.height <= a.y
+  );
 }
 
 /**
@@ -42,6 +55,7 @@ export function FramedPane({
   zIndex,
   viewport,
   workspaceBounds,
+  otherFrames,
   onMove,
   onFocus,
   onClose,
@@ -54,15 +68,82 @@ export function FramedPane({
     startFrame: FrameRect;
   }>(null);
 
-  const clamp = (r: FrameRect): FrameRect => {
-    // Keep size within workspace bounds (never larger than the container) so
-    // a pane can't force the workspace to scroll.
-    const maxW = Math.max(MIN_W, workspaceBounds.width);
-    const maxH = Math.max(MIN_H, workspaceBounds.height);
-    const width  = Math.min(Math.max(MIN_W, r.width),  maxW);
-    const height = Math.min(Math.max(MIN_H, r.height), maxH);
-    const x = Math.max(0, Math.min(r.x, workspaceBounds.width  - width));
-    const y = Math.max(0, Math.min(r.y, workspaceBounds.height - height));
+  const snapAndClamp = (r: FrameRect, mode: "move" | "resize"): FrameRect => {
+    const wsW = Math.max(MIN_W, workspaceBounds.width);
+    const wsH = Math.max(MIN_H, workspaceBounds.height);
+
+    let { x, y, width, height } = r;
+    width  = Math.max(MIN_W, Math.min(width,  wsW));
+    height = Math.max(MIN_H, Math.min(height, wsH));
+
+    if (mode === "resize") {
+      // Keep (x, y) fixed. Shrink the pane so it can't extend past the
+      // workspace edge or overlap another pane.
+      width  = Math.min(width,  wsW - x);
+      height = Math.min(height, wsH - y);
+
+      for (const o of otherFrames) {
+        const vAlign = !(y + height <= o.y || o.y + o.height <= y);
+        const hAlign = !(x + width  <= o.x || o.x + o.width  <= x);
+        if (vAlign && x < o.x && x + width  > o.x) width  = o.x - x;
+        if (hAlign && y < o.y && y + height > o.y) height = o.y - y;
+      }
+
+      // Snap right/bottom edge to workspace edge.
+      if (Math.abs(x + width  - wsW) < SNAP) width  = wsW - x;
+      if (Math.abs(y + height - wsH) < SNAP) height = wsH - y;
+      // Snap right/bottom edge to another pane's left/top.
+      for (const o of otherFrames) {
+        if (Math.abs((x + width)  - o.x) < SNAP) width  = o.x - x;
+        if (Math.abs((y + height) - o.y) < SNAP) height = o.y - y;
+      }
+
+      width  = Math.max(MIN_W, width);
+      height = Math.max(MIN_H, height);
+      return { x, y, width, height };
+    }
+
+    // Move mode — keep size, adjust position.
+    // First pass: workspace edge snaps.
+    if (Math.abs(x) < SNAP) x = 0;
+    if (Math.abs(y) < SNAP) y = 0;
+    if (Math.abs(x + width  - wsW) < SNAP) x = wsW - width;
+    if (Math.abs(y + height - wsH) < SNAP) y = wsH - height;
+
+    // Second pass: snap to each other pane's edges (touching + aligned).
+    for (const o of otherFrames) {
+      // Edge-to-edge (touching): my left ↔ their right, my right ↔ their left, etc.
+      if (Math.abs(x - (o.x + o.width)) < SNAP)   x = o.x + o.width;
+      if (Math.abs((x + width)  - o.x) < SNAP)    x = o.x - width;
+      if (Math.abs(y - (o.y + o.height)) < SNAP)  y = o.y + o.height;
+      if (Math.abs((y + height) - o.y) < SNAP)    y = o.y - height;
+      // Edge-aligned: same left, same right, same top, same bottom.
+      if (Math.abs(x - o.x) < SNAP) x = o.x;
+      if (Math.abs((x + width)  - (o.x + o.width))  < SNAP) x = o.x + o.width  - width;
+      if (Math.abs(y - o.y) < SNAP) y = o.y;
+      if (Math.abs((y + height) - (o.y + o.height)) < SNAP) y = o.y + o.height - height;
+    }
+
+    // Clamp to workspace so the pane can't leave the container.
+    x = Math.max(0, Math.min(x, wsW - width));
+    y = Math.max(0, Math.min(y, wsH - height));
+
+    // Push out of any remaining overlap along the nearest edge.
+    for (const o of otherFrames) {
+      if (!intersects({ x, y, width, height }, o)) continue;
+      const overlapLeft   = (x + width)  - o.x;       // push left by this
+      const overlapRight  = (o.x + o.width)  - x;     // push right
+      const overlapTop    = (y + height) - o.y;       // push up
+      const overlapBottom = (o.y + o.height) - y;     // push down
+      const min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+      if      (min === overlapLeft)   x = o.x - width;
+      else if (min === overlapRight)  x = o.x + o.width;
+      else if (min === overlapTop)    y = o.y - height;
+      else                            y = o.y + o.height;
+      x = Math.max(0, Math.min(x, wsW - width));
+      y = Math.max(0, Math.min(y, wsH - height));
+    }
+
     return { x, y, width, height };
   };
 
@@ -115,17 +196,17 @@ export function FramedPane({
       const dx = e.clientX - d.startX;
       const dy = e.clientY - d.startY;
       if (d.mode === "move") {
-        schedule(clamp({
+        schedule(snapAndClamp({
           ...d.startFrame,
           x: d.startFrame.x + dx,
           y: d.startFrame.y + dy,
-        }));
+        }, "move"));
       } else {
-        schedule(clamp({
+        schedule(snapAndClamp({
           ...d.startFrame,
           width:  d.startFrame.width  + dx,
           height: d.startFrame.height + dy,
-        }));
+        }, "resize"));
       }
     };
     const onUpWin = () => {
@@ -144,7 +225,7 @@ export function FramedPane({
       if (rafId) cancelAnimationFrame(rafId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frame.x, frame.y, frame.width, frame.height, workspaceBounds.width, workspaceBounds.height]);
+  }, [frame.x, frame.y, frame.width, frame.height, workspaceBounds.width, workspaceBounds.height, otherFrames.length]);
 
   return (
     <div
