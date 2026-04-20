@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-ssr
+.DS_Store
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+src-tauri/WixTools
+
+# Editor
+.vscode
+.idea
+*.log
