@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   FramedPane,
   TITLE_H,
@@ -12,6 +13,9 @@ import {
 } from "./FramedPane";
 import { FrameRect, tileLayout } from "./layout";
 import { FeedbackCapture } from "./FeedbackCapture";
+
+const APP_VERSION = __APP_VERSION__;
+const REPO_URL    = "https://github.com/issamsaadane/kroxpersonas";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -168,9 +172,19 @@ export default function App() {
   const workspaceRef            = useRef<HTMLDivElement | null>(null);
 
   const [managerOpen, setManagerOpen] = useState(false);
+  const [aboutOpen, setAboutOpen]     = useState(false);
+  const [updateReady, setUpdateReady] = useState<string | null>(null);
 
   const panesRef = useRef<OpenPane[]>(panes);
   useEffect(() => { panesRef.current = panes; }, [panes]);
+
+  // Silent updater: Rust emits `update_ready` when a new version has been
+  // downloaded + staged. We just surface it passively in the About panel;
+  // the update applies on next restart.
+  useEffect(() => {
+    const unsub = listen<string>("update_ready", (e) => setUpdateReady(e.payload));
+    return () => { unsub.then((u) => u()).catch(() => {}); };
+  }, []);
 
   // Boot
   useEffect(() => {
@@ -507,6 +521,20 @@ export default function App() {
             ? "Click the K button to open the manager →"
             : `${panes.length} persona${panes.length === 1 ? "" : "s"} open`}
         </span>
+        <div className="topbar-right">
+          {updateReady && (
+            <span className="update-pill" title={`v${updateReady} staged — will apply on restart`}>
+              Update ready
+            </span>
+          )}
+          <button
+            className="topbar-btn"
+            onClick={() => setAboutOpen(true)}
+            title={`About KroxPersonas v${APP_VERSION}`}
+          >
+            v{APP_VERSION}
+          </button>
+        </div>
       </header>
 
       <section className="workspace" ref={workspaceRef}>
@@ -563,9 +591,92 @@ export default function App() {
         />
       )}
 
+      {aboutOpen && (
+        <AboutModal
+          updateReady={updateReady}
+          onClose={() => setAboutOpen(false)}
+          pushToast={pushToast}
+        />
+      )}
+
       {toast && <div className="toast">{toast}</div>}
 
       <FeedbackCapture />
+    </div>
+  );
+}
+
+// ─── About modal ─────────────────────────────────────────────────────────────
+
+function AboutModal({
+  updateReady,
+  onClose,
+  pushToast,
+}: {
+  updateReady: string | null;
+  onClose: () => void;
+  pushToast: (msg: string) => void;
+}) {
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const checkNow = async () => {
+    setChecking(true);
+    try {
+      const version = await invoke<string>("check_for_update_now");
+      pushToast(version ? `Update v${version} downloaded — restart to apply` : "You're up to date");
+    } catch (err: unknown) {
+      pushToast(`Update check failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const restart = () => { invoke("restart_app").catch(() => {}); };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="about-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="about-logo">P</div>
+        <h2 className="about-name">KroxPersonas</h2>
+        <div className="about-version">Version {APP_VERSION}</div>
+        <p className="about-desc">
+          Standalone multi-account test launcher. One app, many projects, many
+          test users per project. Cookie-isolated webviews with auto-login.
+        </p>
+
+        <div className="about-update">
+          {updateReady ? (
+            <>
+              <div className="update-line ready">
+                Update <strong>v{updateReady}</strong> downloaded — applied on restart.
+              </div>
+              <button className="btn primary full" onClick={restart}>Restart now</button>
+            </>
+          ) : (
+            <button
+              className="btn full"
+              onClick={checkNow}
+              disabled={checking}
+            >
+              {checking ? "Checking…" : "Check for updates"}
+            </button>
+          )}
+        </div>
+
+        <div className="about-links">
+          <a href={REPO_URL} target="_blank" rel="noreferrer">View on GitHub</a>
+          <span className="sep">·</span>
+          <span className="about-identifier">com.kroxpersonas.desktop</span>
+        </div>
+
+        <button className="btn about-close" onClick={onClose}>Close</button>
+      </div>
     </div>
   );
 }

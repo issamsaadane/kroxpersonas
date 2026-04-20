@@ -4,6 +4,8 @@
   "description": "Controller window capabilities",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

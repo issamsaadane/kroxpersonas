@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
 };
 use tauri::webview::WebviewBuilder;
+use tauri_plugin_updater::UpdaterExt;
 
 // ─── Config types (mirror src/App.tsx) ──────────────────────────────────────
 
@@ -486,11 +487,59 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Err("unsupported platform".into())
 }
 
+// ─── Silent updater ────────────────────────────────────────────────────────
+
+/// Run on startup. Fire-and-forget: checks endpoint, downloads, and stages
+/// the update so it applies on next app launch. No UI prompt — if an update
+/// is found and installed, we emit `update_ready` so the frontend can
+/// (optionally) surface "Update ready, restart to apply" in the About panel.
+async fn check_for_update(app: AppHandle) {
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        _ => return,
+    };
+    let version = update.version.clone();
+    if update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .is_ok()
+    {
+        let _ = app.emit("update_ready", version);
+    }
+}
+
+/// Manual "check now" trigger from the About panel. Returns the new version
+/// string if an update was staged, or an empty string when already up-to-date.
+#[tauri::command]
+async fn check_for_update_now(app: AppHandle) -> Result<String, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let Some(update) = update else { return Ok(String::new()); };
+    let version = update.version.clone();
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("update_ready", version.clone());
+    Ok(version)
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
 // ─── Entry ──────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(PaneState::default())
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -503,7 +552,16 @@ pub fn run() {
             capture_primary_screen,
             open_screen_recording_settings,
             copy_creds,
+            check_for_update_now,
+            restart_app,
         ])
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                check_for_update(handle).await;
+            });
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
