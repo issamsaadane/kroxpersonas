@@ -466,6 +466,7 @@ export default function App() {
               zIndex={p.zIndex}
               workspaceBounds={workspaceBounds}
               otherFrames={others}
+              lockedSize={p.viewport !== "fit"}
               onMove={(frame) => handlePaneMove(p.instanceId, frame)}
               onFocus={() => handlePaneFocus(p.instanceId)}
               onClose={() => handlePaneClose(p.instanceId)}

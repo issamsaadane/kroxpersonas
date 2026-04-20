@@ -45,6 +45,9 @@ interface Props {
   zIndex: number;
   workspaceBounds: { width: number; height: number };
   otherFrames: FrameRect[];
+  /** When true, the pane can still be moved but resize handles are hidden
+   *  (device-preset panes have fixed dimensions). */
+  lockedSize?: boolean;
   onMove: (rect: FrameRect) => void;
   onFocus: () => void;
   onClose: () => void;
@@ -69,6 +72,7 @@ export function FramedPane({
   zIndex,
   workspaceBounds,
   otherFrames,
+  lockedSize = false,
   onMove,
   onFocus,
   onClose,
@@ -247,9 +251,13 @@ export function FramedPane({
           EDGE pixels — that thin strip is HTML, used for edge resize. */}
       <div className="pane-slot" />
 
-      <div className="pane-edge e"  onPointerDown={onResizeDown("e")}  />
-      <div className="pane-edge s"  onPointerDown={onResizeDown("s")}  />
-      <div className="pane-edge se" onPointerDown={onResizeDown("se")} />
+      {!lockedSize && (
+        <>
+          <div className="pane-edge e"  onPointerDown={onResizeDown("e")}  />
+          <div className="pane-edge s"  onPointerDown={onResizeDown("s")}  />
+          <div className="pane-edge se" onPointerDown={onResizeDown("se")} />
+        </>
+      )}
     </div>
   );
 }
