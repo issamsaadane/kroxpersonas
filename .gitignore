@@ -12,3 +12,8 @@ src-tauri/WixTools
 .vscode
 .idea
 *.log
+
+# TS build artefacts (vite/tsc emit)
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
