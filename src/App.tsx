@@ -426,19 +426,27 @@ export default function App() {
 
   return (
     <div className="app-slim">
-      {/* Top-left logo button — opens the manager popup */}
-      <button
-        className="logo-btn"
-        onClick={() => setManagerOpen(true)}
-        title="Open manager"
-      >
-        K
-      </button>
+      {/* Top bar — always visible above the workspace, so panes can't cover the
+          K button (native webviews render on top of HTML). */}
+      <header className="topbar">
+        <button
+          className="logo-btn"
+          onClick={() => setManagerOpen(true)}
+          title="Open manager"
+        >
+          K
+        </button>
+        <span className="hint">
+          {panes.length === 0
+            ? "Click the K button to open the manager →"
+            : `${panes.length} persona${panes.length === 1 ? "" : "s"} open`}
+        </span>
+      </header>
 
       <section className="workspace" ref={workspaceRef}>
         {panes.length === 0 && !managerOpen && (
           <div className="workspace-empty">
-            Click the <strong>K</strong> logo to open the manager.
+            Click the <strong>K</strong> button in the top bar to open the manager.
           </div>
         )}
         {panes.map((p) => {

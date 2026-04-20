@@ -35,16 +35,32 @@ button { font: inherit; color: inherit; cursor: pointer; }
   grid-template-columns: 44px 1fr;
 }
 
-/* Slim app shell — just workspace + a floating K logo button. The Manager
-   overlay carries all the controls. */
+/* Slim app shell — top bar with K logo, workspace fills the rest. The logo
+   MUST live outside the workspace because native webviews always render
+   above HTML, and a pane's webview would cover any button we overlay there. */
 .app-slim {
-  position: relative;
   height: 100vh;
   background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+.app-slim .topbar {
+  height: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.app-slim .topbar .hint {
+  color: var(--text-faint);
+  font-size: 11px;
 }
 .app-slim .workspace {
-  position: absolute;
-  inset: 0;
+  flex: 1;
+  position: relative;
   overflow: hidden;
   background:
     radial-gradient(circle at 1px 1px, rgba(255,255,255,0.035) 1px, transparent 0) 0 0 / 20px 20px,
@@ -52,21 +68,18 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 
 .logo-btn {
-  position: fixed;
-  top: 12px; left: 12px;
-  z-index: 300;
-  width: 36px; height: 36px;
-  border-radius: 10px;
+  width: 32px; height: 32px;
+  border-radius: 8px;
   background: var(--primary);
   color: var(--primary-ink);
   border: none;
   font-weight: 700;
-  font-size: 15px;
+  font-size: 14px;
   display: grid; place-items: center;
-  box-shadow: 0 6px 20px rgba(124,92,255,0.35);
+  flex-shrink: 0;
   transition: transform 120ms ease, box-shadow 120ms ease;
 }
-.logo-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(124,92,255,0.45); }
+.logo-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(124,92,255,0.4); }
 
 /* ── Manager overlay ──────────────────────────────────────────────────── */
 
