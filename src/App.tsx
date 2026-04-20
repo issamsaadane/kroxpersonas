@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { FramedPane, FrameRect, TITLE_H, BOTTOM_H, MIN_W, MIN_H } from "./FramedPane";
+import { FramedPane, TITLE_H, Viewport, VIEWPORT_PRESETS } from "./FramedPane";
+import { FrameRect, tileLayout } from "./layout";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -10,6 +11,7 @@ interface Persona {
   email: string;
   password: string;
   label: string;
+  viewport?: Viewport;
 }
 
 interface Project {
@@ -19,15 +21,21 @@ interface Project {
   personas: Persona[];
 }
 
+interface UiState {
+  sidebarCollapsed: boolean;
+  openPersonaIds: string[];                  // restored on next launch
+  paneViewport: Record<string, Viewport>;    // per persona
+}
+
 interface Config {
   projects: Project[];
+  ui?: UiState;
 }
 
 interface OpenPane {
   personaId: string;
   projectId: string;
-  frame: FrameRect;
-  zIndex: number;
+  viewport: Viewport;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -82,16 +90,31 @@ async function copyCreds(email: string, password: string) {
   await invoke("copy_creds", { email, password });
 }
 
-// Convert a frame's local workspace coords into the webview rect (absolute in main window).
-function frameToWebviewRect(
-  frame: FrameRect,
-  workspaceRect: DOMRect,
+/**
+ * Given a tile (local to workspace) and a viewport preset, compute the
+ * webview rect IN ABSOLUTE main-window coords (what Rust expects).
+ */
+function webviewRectForTile(
+  tile: FrameRect,
+  viewport: Viewport,
+  workspaceAbsolute: { left: number; top: number },
 ): { x: number; y: number; width: number; height: number } {
+  const innerW = tile.width;
+  const innerH = tile.height - TITLE_H;
+  let wvW = innerW;
+  let wvH = innerH;
+  if (viewport !== "fit") {
+    const p = VIEWPORT_PRESETS[viewport];
+    wvW = Math.min(p.w, innerW);
+    wvH = Math.min(p.h, innerH);
+  }
+  const offX = Math.round((innerW - wvW) / 2);
+  const offY = Math.round((innerH - wvH) / 2);
   return {
-    x: Math.round(workspaceRect.left + frame.x),
-    y: Math.round(workspaceRect.top + frame.y + TITLE_H),
-    width:  Math.max(1, Math.round(frame.width)),
-    height: Math.max(1, Math.round(frame.height - TITLE_H - BOTTOM_H)),
+    x: Math.round(workspaceAbsolute.left + tile.x + offX),
+    y: Math.round(workspaceAbsolute.top  + tile.y + TITLE_H + offY),
+    width:  Math.max(1, Math.round(wvW)),
+    height: Math.max(1, Math.round(wvH)),
   };
 }
 
@@ -132,44 +155,73 @@ export default function App() {
   const [ready, setReady]               = useState(false);
 
   const [panes, setPanes]               = useState<OpenPane[]>([]);
-  const [zTop, setZTop]                 = useState(10);
-  const [workspaceBounds, setWorkspaceBounds] = useState({ width: 800, height: 600 });
-  const workspaceRef                    = useRef<HTMLDivElement | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [workspaceBounds, setWorkspaceBounds]   = useState({ width: 800, height: 600 });
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
 
-  // Load config
+  // Snapshot for sync handlers
+  const panesRef = useRef<OpenPane[]>(panes);
+  useEffect(() => { panesRef.current = panes; }, [panes]);
+
+  // Load config + restore previously open panes
   useEffect(() => {
-    loadConfig()
-      .then((c) => {
-        setConfig(c);
-        if (c.projects.length && !activeId) setActiveId(c.projects[0].id);
-      })
-      .finally(() => setReady(true));
-    // On app close, drop any lingering webviews from the last run.
-    return () => { closeAllPanesRust().catch(() => {}); };
+    let cancelled = false;
+    loadConfig().then((c) => {
+      if (cancelled) return;
+      setConfig(c);
+      if (c.projects.length && !activeId) setActiveId(c.projects[0].id);
+      setSidebarCollapsed(c.ui?.sidebarCollapsed ?? false);
+
+      // Restore previously-open personas (one-shot, then mark ready).
+      const restore = (c.ui?.openPersonaIds ?? []).flatMap((pid) => {
+        for (const proj of c.projects) {
+          const u = proj.personas.find((x) => x.id === pid);
+          if (u) return [{ persona: u, project: proj }];
+        }
+        return [];
+      });
+
+      // Defer restoration until workspace has real bounds.
+      const ws = workspaceRef.current?.getBoundingClientRect();
+      const vp = (c.ui?.paneViewport ?? {}) as Record<string, Viewport>;
+      if (restore.length && ws) {
+        const initial: OpenPane[] = restore.map(({ persona, project }) => ({
+          personaId: persona.id,
+          projectId: project.id,
+          viewport: vp[persona.id] ?? persona.viewport ?? "fit",
+        }));
+        setPanes(initial);
+        openRestoredPanes(initial, c).catch(console.error);
+      }
+    }).finally(() => setReady(true));
+
+    return () => { cancelled = true; closeAllPanesRust().catch(() => {}); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist on change (after initial load)
+  // Persist config on change (after initial load)
   useEffect(() => {
     if (!ready) return;
-    saveConfig(config).catch(console.error);
-  }, [config, ready]);
+    const ui: UiState = {
+      sidebarCollapsed,
+      openPersonaIds: panes.map((p) => p.personaId),
+      paneViewport: panes.reduce<Record<string, Viewport>>((acc, p) => {
+        acc[p.personaId] = p.viewport;
+        return acc;
+      }, {}),
+    };
+    const next: Config = { ...config, ui };
+    saveConfig(next).catch(console.error);
+  }, [config, panes, sidebarCollapsed, ready]);
 
-  // Keep workspace bounds in sync on layout changes.
+  // Workspace ResizeObserver → re-tile every pane whenever dimensions change.
   useEffect(() => {
     const recalc = () => {
       const el = workspaceRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
       setWorkspaceBounds({ width: r.width, height: r.height });
-      // Reposition any open panes so their webviews stay aligned with the moving HTML frame.
-      setPanes((prev) => {
-        prev.forEach((p) => {
-          const rect = frameToWebviewRect(p.frame, r);
-          setPaneBoundsRust(p.personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
-        });
-        return prev;
-      });
+      applyTiling(panesRef.current, r);
     };
     recalc();
     const ro = new ResizeObserver(recalc);
@@ -181,6 +233,24 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-tile whenever the set of open panes or their viewports change.
+  useEffect(() => {
+    const el = workspaceRef.current;
+    if (!el) return;
+    applyTiling(panes, el.getBoundingClientRect());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panes]);
+
+  const applyTiling = (currentPanes: OpenPane[], ws: DOMRect) => {
+    const tiles = tileLayout(currentPanes.length, ws.width, ws.height);
+    currentPanes.forEach((p, i) => {
+      const tile = tiles[i];
+      if (!tile) return;
+      const rect = webviewRectForTile(tile, p.viewport, { left: ws.left, top: ws.top });
+      setPaneBoundsRust(p.personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
+    });
+  };
 
   const activeProject = useMemo(
     () => config.projects.find((p) => p.id === activeId) ?? null,
@@ -209,7 +279,6 @@ export default function App() {
   };
   const deleteProject = (id: string) => {
     if (!confirm("Delete this project and all its personas? This cannot be undone.")) return;
-    // Close any open panes belonging to this project.
     setPanes((prev) => {
       const drop = prev.filter((p) => p.projectId === id);
       drop.forEach((p) => closePaneRust(p.personaId).catch(() => {}));
@@ -259,34 +328,42 @@ export default function App() {
 
   // ── pane lifecycle ────────────────────────────────────────────────────────
 
-  const defaultFrame = (): FrameRect => {
-    // Cascade placement: each new pane offsets from the previous one.
-    const count = panes.length;
-    const baseX = 40 + (count % 6) * 32;
-    const baseY = 40 + (count % 6) * 32;
-    const width  = Math.min(920, Math.max(MIN_W, workspaceBounds.width - baseX - 40));
-    const height = Math.min(700, Math.max(MIN_H, workspaceBounds.height - baseY - 40));
-    return { x: baseX, y: baseY, width, height };
-  };
+  async function openRestoredPanes(initial: OpenPane[], cfg: Config) {
+    const ws = workspaceRef.current?.getBoundingClientRect();
+    if (!ws) return;
+    const tiles = tileLayout(initial.length, ws.width, ws.height);
+    for (let i = 0; i < initial.length; i++) {
+      const pane = initial[i];
+      const proj = cfg.projects.find((p) => p.id === pane.projectId);
+      const persona = proj?.personas.find((u) => u.id === pane.personaId);
+      if (!proj || !persona) continue;
+      const rect = webviewRectForTile(tiles[i], pane.viewport, { left: ws.left, top: ws.top });
+      try {
+        await openPaneRust(persona.id, proj.serverUrl, persona.email, persona.password,
+          rect.x, rect.y, rect.width, rect.height);
+      } catch {/* ignore */}
+    }
+  }
 
   const handleLaunch = async (u: Persona) => {
     if (!activeProject) return;
-    const existing = panes.find((p) => p.personaId === u.id);
-    if (existing) {
-      // Already open — just bring to front.
-      setZTop((z) => {
-        const next = z + 1;
-        setPanes((prev) => prev.map((p) => p.personaId === u.id ? { ...p, zIndex: next } : p));
-        return next;
-      });
+    if (panes.some((p) => p.personaId === u.id)) {
       pushToast(`${u.name} is already open`);
       return;
     }
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
-    const frame = defaultFrame();
-    const rect = frameToWebviewRect(frame, ws);
 
+    // Add to list first (this drives the grid layout), then Rust-open, then re-tile.
+    const nextPanes: OpenPane[] = [
+      ...panes,
+      { personaId: u.id, projectId: activeProject.id, viewport: u.viewport ?? "fit" },
+    ];
+    setPanes(nextPanes);
+
+    const tiles = tileLayout(nextPanes.length, ws.width, ws.height);
+    const newIdx = nextPanes.length - 1;
+    const rect = webviewRectForTile(tiles[newIdx], "fit", { left: ws.left, top: ws.top });
     try {
       await openPaneRust(
         u.id,
@@ -295,18 +372,13 @@ export default function App() {
         u.password,
         rect.x, rect.y, rect.width, rect.height,
       );
-      const newZ = zTop + 1;
-      setZTop(newZ);
-      setPanes((prev) => [...prev, {
-        personaId: u.id,
-        projectId: activeProject.id,
-        frame,
-        zIndex: newZ,
-      }]);
+      // After the webview exists, apply tiling for everyone (in case other tile sizes changed).
+      applyTiling(nextPanes, ws);
       pushToast(`Launching ${u.name}…`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       pushToast(`Launch failed: ${msg}`);
+      setPanes((prev) => prev.filter((p) => p.personaId !== u.id));
     }
   };
 
@@ -319,25 +391,13 @@ export default function App() {
     }
   };
 
-  const handlePaneMove = (personaId: string, frame: FrameRect) => {
-    setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, frame } : p)));
-    const ws = workspaceRef.current?.getBoundingClientRect();
-    if (!ws) return;
-    const r = frameToWebviewRect(frame, ws);
-    setPaneBoundsRust(personaId, r.x, r.y, r.width, r.height).catch(() => {});
-  };
-
-  const handlePaneFocus = (personaId: string) => {
-    setZTop((z) => {
-      const next = z + 1;
-      setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, zIndex: next } : p)));
-      return next;
-    });
-  };
-
   const handlePaneClose = (personaId: string) => {
     closePaneRust(personaId).catch(() => {});
     setPanes((prev) => prev.filter((p) => p.personaId !== personaId));
+  };
+
+  const handleSetViewport = (personaId: string, viewport: Viewport) => {
+    setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, viewport } : p)));
   };
 
   // ── grouping for active project ───────────────────────────────────────────
@@ -354,10 +414,8 @@ export default function App() {
       .map(([label, users]) => ({ label, users }));
   }, [activeProject]);
 
-  // Helper: is a persona currently open?
   const isOpen = (id: string) => panes.some((p) => p.personaId === id);
 
-  // Resolve persona + project for each pane (for title display).
   const paneInfo = (personaId: string) => {
     for (const proj of config.projects) {
       const u = proj.personas.find((x) => x.id === personaId);
@@ -366,38 +424,55 @@ export default function App() {
     return null;
   };
 
+  // ── tile geometry for render (must mirror Rust-side placement) ────────────
+
+  const tiles = useMemo(
+    () => tileLayout(panes.length, workspaceBounds.width, workspaceBounds.height),
+    [panes.length, workspaceBounds.width, workspaceBounds.height],
+  );
+
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="app">
+    <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       {/* Sidebar */}
       <aside className="sidebar">
         <header>
           <div className="logo">K</div>
-          <h1>KroxPersonas</h1>
+          {!sidebarCollapsed && <h1>KroxPersonas</h1>}
+          <button
+            className="collapse-btn"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {sidebarCollapsed ? "›" : "‹"}
+          </button>
         </header>
 
-        <div className="project-list">
-          {config.projects.length === 0 && (
-            <div className="empty" style={{ padding: "20px 10px" }}>No projects yet.</div>
-          )}
-          {config.projects.map((p) => (
-            <button
-              key={p.id}
-              className={`project-row ${activeId === p.id ? "active" : ""}`}
-              onClick={() => setActiveId(p.id)}
-            >
-              <span className="name">{p.name}</span>
-              <span className="count">{p.personas.length}</span>
-            </button>
-          ))}
-        </div>
-
-        <footer>
-          <button className="btn primary full" onClick={() => setProjModal({ mode: "new" })}>
-            + New project
-          </button>
-        </footer>
+        {!sidebarCollapsed && (
+          <>
+            <div className="project-list">
+              {config.projects.length === 0 && (
+                <div className="empty" style={{ padding: "20px 10px" }}>No projects yet.</div>
+              )}
+              {config.projects.map((p) => (
+                <button
+                  key={p.id}
+                  className={`project-row ${activeId === p.id ? "active" : ""}`}
+                  onClick={() => setActiveId(p.id)}
+                >
+                  <span className="name">{p.name}</span>
+                  <span className="count">{p.personas.length}</span>
+                </button>
+              ))}
+            </div>
+            <footer>
+              <button className="btn primary full" onClick={() => setProjModal({ mode: "new" })}>
+                + New project
+              </button>
+            </footer>
+          </>
+        )}
       </aside>
 
       {/* Main */}
@@ -484,20 +559,19 @@ export default function App() {
                     Click <strong>Launch</strong> on any persona to open it here.
                   </div>
                 )}
-                {panes.map((p) => {
+                {panes.map((p, i) => {
                   const info = paneInfo(p.personaId);
-                  if (!info) return null;
+                  const tile = tiles[i];
+                  if (!info || !tile) return null;
                   return (
                     <FramedPane
                       key={p.personaId}
                       title={info.user.name}
-                      subtitle={info.user.label}
-                      frame={p.frame}
-                      zIndex={p.zIndex}
-                      workspaceBounds={workspaceBounds}
-                      onMove={(frame) => handlePaneMove(p.personaId, frame)}
-                      onFocus={() => handlePaneFocus(p.personaId)}
+                      subtitle={p.viewport === "fit" ? info.user.label : p.viewport}
+                      frame={tile}
+                      viewport={p.viewport}
                       onClose={() => handlePaneClose(p.personaId)}
+                      onSetViewport={(v) => handleSetViewport(p.personaId, v)}
                     />
                   );
                 })}

@@ -16,6 +16,8 @@ use tauri::webview::WebviewBuilder;
 struct Config {
     #[serde(default)]
     projects: Vec<Project>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ui: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
