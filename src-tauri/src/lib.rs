@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
+use std::sync::Mutex;
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
+};
+use tauri::webview::WebviewBuilder;
 
 // ─── Config types (mirror src/App.tsx) ──────────────────────────────────────
 
@@ -31,6 +36,13 @@ struct Persona {
     email: String,
     password: String,
     label: String,
+}
+
+// ─── Pane state (child webviews we manage per label) ───────────────────────
+
+#[derive(Default)]
+struct PaneState {
+    webviews: Mutex<HashMap<String, Webview>>,
 }
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -80,7 +92,6 @@ fn init_script(email: &str, password: &str) -> String {
     format!(
         r#"
 (() => {{
-  // Strip Tauri globals so the target app sees a plain browser env.
   const TAURI_KEYS = ['__TAURI__','__TAURI_INTERNALS__','__TAURI_INVOKE__','__TAURI_METADATA__','__TAURI_IPC__','__TAURI_POST_MESSAGE__','__TAURI_PATTERN__','__TAURI_EVENT_PLUGIN_INTERNALS__'];
   for (const k of TAURI_KEYS) {{
     try {{ delete window[k]; }} catch (e) {{}}
@@ -156,8 +167,6 @@ fn normalise_url(raw: &str) -> Result<tauri::Url, String> {
         .map_err(|e| format!("invalid URL '{with_scheme}': {e}"))
 }
 
-// ─── Commands: persona panes (child webviews of the main window) ──────────
-
 fn webview_label(persona_id: &str) -> String {
     format!(
         "persona-{}",
@@ -168,11 +177,12 @@ fn webview_label(persona_id: &str) -> String {
     )
 }
 
-/// Open a persona as a child webview of the main window at the given bounds.
-/// Position and size are in logical (CSS) pixels, relative to the main window's content area.
+// ─── Commands: persona panes ───────────────────────────────────────────────
+
 #[tauri::command]
 fn open_pane(
     app: AppHandle,
+    state: State<'_, PaneState>,
     persona_id: String,
     url: String,
     email: String,
@@ -185,11 +195,14 @@ fn open_pane(
     let parsed = normalise_url(&url)?;
     let label = webview_label(&persona_id);
 
-    // Idempotent: if already open, just move/resize.
-    if let Some(existing) = app.webviews().get(&label).cloned() {
-        let _ = existing.set_position(LogicalPosition::new(x, y));
-        let _ = existing.set_size(LogicalSize::new(width, height));
-        return Ok(());
+    // If a pane for this persona already exists, just move/resize.
+    {
+        let map = state.webviews.lock().map_err(|e| format!("lock: {e}"))?;
+        if let Some(existing) = map.get(&label) {
+            let _ = existing.set_position(LogicalPosition::new(x, y));
+            let _ = existing.set_size(LogicalSize::new(width, height));
+            return Ok(());
+        }
     }
 
     let window = app
@@ -201,7 +214,7 @@ fn open_pane(
         .incognito(true)
         .initialization_script(&script);
 
-    window
+    let webview = window
         .add_child(
             builder,
             LogicalPosition::new(x, y),
@@ -209,12 +222,18 @@ fn open_pane(
         )
         .map_err(|e| format!("add_child: {e}"))?;
 
+    state
+        .webviews
+        .lock()
+        .map_err(|e| format!("lock: {e}"))?
+        .insert(label, webview);
+
     Ok(())
 }
 
 #[tauri::command]
 fn set_pane_bounds(
-    app: AppHandle,
+    state: State<'_, PaneState>,
     persona_id: String,
     x: f64,
     y: f64,
@@ -222,10 +241,9 @@ fn set_pane_bounds(
     height: f64,
 ) -> Result<(), String> {
     let label = webview_label(&persona_id);
-    let webview = app
-        .webviews()
+    let map = state.webviews.lock().map_err(|e| format!("lock: {e}"))?;
+    let webview = map
         .get(&label)
-        .cloned()
         .ok_or_else(|| format!("pane {label} not open"))?;
     let _ = webview.set_position(LogicalPosition::new(x, y));
     let _ = webview.set_size(LogicalSize::new(width, height));
@@ -233,26 +251,21 @@ fn set_pane_bounds(
 }
 
 #[tauri::command]
-fn close_pane(app: AppHandle, persona_id: String) -> Result<(), String> {
+fn close_pane(state: State<'_, PaneState>, persona_id: String) -> Result<(), String> {
     let label = webview_label(&persona_id);
-    if let Some(webview) = app.webviews().get(&label).cloned() {
-        webview.close().map_err(|e| format!("close: {e}"))?;
+    let mut map = state.webviews.lock().map_err(|e| format!("lock: {e}"))?;
+    if let Some(webview) = map.remove(&label) {
+        // Best-effort; ignore the result — a closed webview is all we care about.
+        let _ = webview.close();
     }
     Ok(())
 }
 
 #[tauri::command]
-fn close_all_panes(app: AppHandle) -> Result<(), String> {
-    let labels: Vec<String> = app
-        .webviews()
-        .keys()
-        .filter(|k| k.starts_with("persona-"))
-        .cloned()
-        .collect();
-    for label in labels {
-        if let Some(w) = app.webviews().get(&label).cloned() {
-            let _ = w.close();
-        }
+fn close_all_panes(state: State<'_, PaneState>) -> Result<(), String> {
+    let mut map = state.webviews.lock().map_err(|e| format!("lock: {e}"))?;
+    for (_label, webview) in map.drain() {
+        let _ = webview.close();
     }
     Ok(())
 }
@@ -264,6 +277,7 @@ fn copy_creds(email: String, password: String) -> Result<(), String> {
     copy_to_clipboard(&format!("{email}\t{password}"))
 }
 
+#[allow(unused_variables)]
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -279,7 +293,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
             .write_all(text.as_bytes())
             .map_err(|e| format!("write pbcopy: {e}"))?;
         child.wait().map_err(|e| format!("pbcopy wait: {e}"))?;
-        Ok(())
+        return Ok(());
     }
 
     #[cfg(target_os = "linux")]
@@ -298,7 +312,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
             .write_all(text.as_bytes())
             .map_err(|e| format!("write xclip: {e}"))?;
         child.wait().map_err(|e| format!("xclip wait: {e}"))?;
-        Ok(())
+        return Ok(());
     }
 
     #[cfg(target_os = "windows")]
@@ -315,8 +329,11 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
             .write_all(text.as_bytes())
             .map_err(|e| format!("write clip: {e}"))?;
         child.wait().map_err(|e| format!("clip wait: {e}"))?;
-        Ok(())
+        return Ok(());
     }
+
+    #[allow(unreachable_code)]
+    Err("unsupported platform".into())
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────
@@ -324,6 +341,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(PaneState::default())
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
