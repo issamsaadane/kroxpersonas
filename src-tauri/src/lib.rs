@@ -84,6 +84,18 @@ fn auto_login_script(email: &str, password: &str) -> String {
     format!(
         r#"
 (() => {{
+  // ── Strip Tauri globals ───────────────────────────────────────────────
+  // Persona windows are Tauri webviews, so the host auto-injects
+  // __TAURI__ / __TAURI_INTERNALS__ / etc. Apps that detect these (e.g.
+  // KroxFlow's topbar) will try to call desktop-only APIs and crash.
+  // Delete them before any page scripts run so the target app sees a
+  // plain browser environment.
+  const TAURI_KEYS = ['__TAURI__','__TAURI_INTERNALS__','__TAURI_INVOKE__','__TAURI_METADATA__','__TAURI_IPC__','__TAURI_POST_MESSAGE__','__TAURI_PATTERN__','__TAURI_EVENT_PLUGIN_INTERNALS__'];
+  for (const k of TAURI_KEYS) {{
+    try {{ delete window[k]; }} catch (e) {{}}
+    try {{ Object.defineProperty(window, k, {{ value: undefined, writable: false, configurable: false }}); }} catch (e) {{}}
+  }}
+
   if (window.__kroxPersonasInstalled) return;
   window.__kroxPersonasInstalled = true;
   const EMAIL = {email};
