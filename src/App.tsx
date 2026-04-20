@@ -45,8 +45,14 @@ async function loadConfig(): Promise<Config> {
   return await invoke<Config>("load_config");
 }
 
-async function launchPersona(personaId: string, url: string, email: string, password: string) {
-  await invoke("launch_persona", { personaId, url, email, password });
+async function launchPersona(
+  personaId: string,
+  personaName: string,
+  url: string,
+  email: string,
+  password: string,
+) {
+  await invoke("launch_persona", { personaId, personaName, url, email, password });
 }
 
 async function copyCredentials(email: string, password: string) {
@@ -178,7 +184,7 @@ export default function App() {
   const handleLaunch = async (u: Persona) => {
     if (!activeProject) return;
     try {
-      await launchPersona(u.id, activeProject.serverUrl, u.email, u.password);
+      await launchPersona(u.id, u.name, activeProject.serverUrl, u.email, u.password);
       pushToast(`Launching ${u.name}…`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

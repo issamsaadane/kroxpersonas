@@ -1,11 +1,10 @@
 # KroxPersonas
 
-Standalone multi-account test launcher. One app, many projects, many test users per project. Click **Launch** on any persona → a new Chrome window opens to that project's URL with an isolated cookie jar per persona. First login is manual (creds auto-copied to clipboard); subsequent launches resume the session automatically because cookies persist in per-persona Chrome profiles.
+Standalone multi-account test launcher. One app, many projects, many test users per project. Click **Launch** on any persona → a new native window opens **inside KroxPersonas** pointed at the project's URL, with its own isolated cookie jar, and the login form is auto-filled and submitted.
 
 ## Stack
-- Tauri 2 (controller app shell)
-- React + TypeScript (UI)
-- System Chrome / Chromium / Edge / Brave (persona windows, isolated via `--user-data-dir`)
+- Tauri 2 (controller app + persona webviews — both native OS windows owned by the same KroxPersonas process)
+- React + TypeScript (controller UI)
 - Local JSON config — no cloud, no keychain
 
 ## Run (dev)
@@ -23,23 +22,28 @@ Produces a `.app` on macOS, `.msi/.exe` on Windows, `.deb/.AppImage` on Linux.
 
 ## Data locations
 - **Config:** `~/Library/Application Support/com.kroxpersonas.app/config.json` (macOS; equivalent on Linux/Windows)
-- **Per-persona Chrome profile:** `~/Library/Application Support/com.kroxpersonas.app/profiles/<persona-id>/`
 
 ## How launching works
 1. Click **Launch** on a persona card.
-2. Tauri spawns the system browser with `--user-data-dir=<profile>` + `--new-window <serverUrl>`.
-3. Credentials (`email\tpassword`) land on the clipboard — paste into the login form on first launch.
-4. Chrome stores cookies inside the profile dir. Next launch goes straight to the app, already authenticated.
-5. Each persona's profile is completely isolated from the others (and from your normal Chrome).
+2. Tauri spawns a new `WebviewWindow` — a native OS window **owned by KroxPersonas**, using the platform webview (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux).
+3. The window is created in **incognito mode**, so its cookie jar is isolated from every other persona and from any Chrome profile on the system.
+4. An `initialization_script` runs on every page load inside the window. It polls for `input[type="email"]` + `input[type="password"]`, fills them with the persona's credentials, and clicks the submit button.
+5. Cookies are ephemeral — when you close the window, the session is gone. Next launch auto-logs-in again. That's the point: predictable, repeatable per-persona sessions.
 
-## Limitations (v1)
-- Form-fill auto-login is not implemented yet — first login is manual paste.
-- Requires Chrome / Chromium / Edge / Brave installed.
+## Why native WebviewWindow instead of spawning Chrome?
+- **Owned by the app** — windows show up under the KroxPersonas app group, not in a separate Chrome process.
+- **Isolation without directory juggling** — `incognito(true)` gives each window a fresh session; no stale profile dirs to clean up.
+- **Auto-login is trivial** — injected `initialization_script` controls every page load in the webview.
+- **Works with apps that send `X-Frame-Options: DENY`** (e.g., KroxFlow) — this is a native webview, not an iframe.
+
+## Limitations
+- Auto-login assumes a standard `input[type="email"]` + `input[type="password"]` + submit-button login form. Magic-link / OAuth-only flows will need per-project custom scripts (roadmap).
 - Passwords are stored in plaintext in `config.json`. Use only for non-production test accounts.
 - macOS primary target; Linux/Windows paths are best-effort.
 
 ## Roadmap
-- Auto-fill login forms via Chrome DevTools Protocol.
+- Per-project custom auto-login script override (for unusual auth flows).
 - Optional OS-keychain credential storage.
-- Persona tagging, search, bulk launch.
-- Shell via Tauri's own multi-webview for an all-in-one app surface (upgrade path from the Chrome-spawn model).
+- Persona tagging, search, bulk launch-all.
+- Side-by-side grid mode (arrange N persona windows in a preset layout).
+- Export/import config between machines.

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 // ─── Config types (mirror src/App.tsx) ──────────────────────────────────────
 
@@ -48,12 +48,6 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir(app)?.join("config.json"))
 }
 
-fn profiles_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = data_dir(app)?.join("profiles");
-    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {dir:?}: {e}"))?;
-    Ok(dir)
-}
-
 // ─── Commands: config ───────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -77,101 +71,141 @@ fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
     Ok(())
 }
 
-// ─── Commands: launch persona ───────────────────────────────────────────────
+// ─── Commands: launch persona (native webview inside KroxPersonas) ─────────
 
-/// Find the system Chrome binary. macOS first (user's platform), then common Linux/Windows paths.
-fn find_chrome() -> Option<PathBuf> {
-    // macOS
-    let mac_paths = [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    ];
-    for p in mac_paths {
-        if PathBuf::from(p).exists() {
-            return Some(PathBuf::from(p));
-        }
-    }
+/// Build the auto-login initialisation script. Runs on every page load in the
+/// persona's webview — polls for an email + password field and submits.
+/// Quietly no-ops on pages without a login form, so subsequent navigation is unaffected.
+fn auto_login_script(email: &str, password: &str) -> String {
+    // Escape the creds safely for embedding in a JS string literal.
+    let email_js = serde_json::to_string(email).unwrap_or_else(|_| "\"\"".into());
+    let pwd_js   = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".into());
 
-    // Linux
-    for bin in ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"] {
-        if let Ok(out) = Command::new("which").arg(bin).output() {
-            if out.status.success() {
-                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !p.is_empty() {
-                    return Some(PathBuf::from(p));
-                }
-            }
-        }
-    }
+    format!(
+        r#"
+(() => {{
+  if (window.__kroxPersonasInstalled) return;
+  window.__kroxPersonasInstalled = true;
+  const EMAIL = {email};
+  const PWD   = {pwd};
+  const MAX_TRIES = 60;       // ~12s at 200ms interval
+  let tries = 0;
+  let submitted = false;
 
-    // Windows
-    #[cfg(target_os = "windows")]
-    {
-        let candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        ];
-        for p in candidates {
-            if PathBuf::from(p).exists() {
-                return Some(PathBuf::from(p));
-            }
-        }
-    }
+  const setVal = (el, v) => {{
+    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+    el.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }};
 
-    None
+  const tryFill = () => {{
+    tries++;
+    if (submitted) return;
+    const emailEl = document.querySelector(
+      'input[type="email"], input[name="email"], input[autocomplete*="email"], input[name="username"]'
+    );
+    const pwdEl = document.querySelector('input[type="password"]');
+    if (emailEl && pwdEl) {{
+      setVal(emailEl, EMAIL);
+      setVal(pwdEl, PWD);
+      const btn = document.querySelector(
+        'button[type="submit"], input[type="submit"], form button:not([type="button"])'
+      );
+      submitted = true;
+      if (btn) setTimeout(() => btn.click(), 250);
+      return;
+    }}
+    if (tries < MAX_TRIES) setTimeout(tryFill, 200);
+  }};
+
+  const kick = () => {{
+    tries = 0;
+    submitted = false;
+    tryFill();
+  }};
+
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', kick);
+  }} else {{
+    kick();
+  }}
+  // SPA route changes — re-run in case the login form mounts later.
+  const push = history.pushState;
+  history.pushState = function(...a) {{ push.apply(this, a); setTimeout(kick, 100); }};
+  window.addEventListener('popstate', () => setTimeout(kick, 100));
+}})();
+"#,
+        email = email_js,
+        pwd = pwd_js
+    )
 }
 
-/// Launch a Chrome window tied to a per-persona profile directory. First launch:
-/// user logs in manually (creds already copied via `copy_creds`), cookies persist
-/// in the profile dir. Subsequent launches auto-resume the session.
 #[tauri::command]
 fn launch_persona(
     app: AppHandle,
     persona_id: String,
+    persona_name: String,
     url: String,
     email: String,
     password: String,
 ) -> Result<(), String> {
-    let browser = find_chrome().ok_or_else(|| {
-        "No supported browser found. Install Google Chrome, Chromium, Edge, or Brave.".to_string()
-    })?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("Server URL is empty — set one on the project first.".into());
+    }
+    // Allow bare hostnames like "localhost:3000" or "app.example.com" by
+    // defaulting to http:// when no scheme is present.
+    let normalised = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("http://{url}")
+    };
+    let parsed = normalised
+        .parse::<tauri::Url>()
+        .map_err(|e| format!("invalid URL '{normalised}': {e}"))?;
 
-    let profile_dir = profiles_root(&app)?.join(&persona_id);
-    fs::create_dir_all(&profile_dir).map_err(|e| format!("mkdir {profile_dir:?}: {e}"))?;
+    // Unique window label per persona — relaunch replaces the previous window.
+    let label = format!("persona-{}", sanitize_label(&persona_id));
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.close();
+    }
 
-    // Pre-load creds into the system clipboard so the user can paste them on first login.
-    // (Doing this inside `launch_persona` rather than a separate command avoids a round-trip.)
-    let _ = copy_to_clipboard(&format!("{email}\t{password}"));
+    let script = auto_login_script(&email, &password);
 
-    // Compose the launch. --new-window forces a fresh window even if another persona is running
-    // under the same Chrome master process (profile dirs differ so cookies stay isolated).
-    let status = Command::new(&browser)
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
-        .arg("--new-window")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("spawn {browser:?}: {e}"))?;
-
-    // Detach — don't wait.
-    drop(status);
-    // Silence unused-var warnings in release.
-    let _ = email;
-    let _ = password;
+    // `incognito(true)` gives each persona its own ephemeral cookie jar / web
+    // storage. Cookies are dropped when the window closes, so the auto-login
+    // script re-authenticates on every launch — which is exactly what we want
+    // for side-by-side persona testing.
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+        .title(format!("{persona_name} — {}", persona_id_short(&persona_id)))
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(560.0, 480.0)
+        .resizable(true)
+        .incognito(true)
+        .initialization_script(&script)
+        .build()
+        .map_err(|e| format!("build persona window: {e}"))?;
 
     Ok(())
 }
+
+/// Close an open persona window (by id). No-op if it isn't open.
+#[tauri::command]
+fn close_persona(app: AppHandle, persona_id: String) -> Result<(), String> {
+    let label = format!("persona-{}", sanitize_label(&persona_id));
+    if let Some(win) = app.get_webview_window(&label) {
+        win.close().map_err(|e| format!("close: {e}"))?;
+    }
+    Ok(())
+}
+
+// ─── Clipboard (fallback "Copy creds" button) ───────────────────────────────
 
 #[tauri::command]
 fn copy_creds(email: String, password: String) -> Result<(), String> {
     copy_to_clipboard(&format!("{email}\t{password}"))
 }
-
-// ─── Clipboard (macOS pbcopy / Linux xclip / Windows clip) ─────────────────
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -228,6 +262,18 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
+// ─── Small helpers ──────────────────────────────────────────────────────────
+
+fn sanitize_label(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+fn persona_id_short(s: &str) -> String {
+    s.chars().take(6).collect()
+}
+
 // ─── Entry ──────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -237,6 +283,7 @@ pub fn run() {
             load_config,
             save_config,
             launch_persona,
+            close_persona,
             copy_creds,
         ])
         .run(tauri::generate_context!())
