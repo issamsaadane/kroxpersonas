@@ -205,15 +205,19 @@ fn open_pane(
         }
     }
 
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
+    let webview_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main webview window not found".to_string())?;
 
     let script = init_script(&email, &password);
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .incognito(true)
         .initialization_script(&script);
 
+    // In Tauri 2's unstable API, the raw Window exposes `add_child` for
+    // spawning additional webviews inside itself. WebviewWindow derefs to
+    // Window so `.window()` gives us the underlying handle.
+    let window = webview_window.window();
     let webview = window
         .add_child(
             builder,
