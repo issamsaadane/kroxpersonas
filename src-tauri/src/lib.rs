@@ -287,6 +287,45 @@ fn set_panes_visible(state: State<'_, PaneState>, visible: bool) -> Result<(), S
     Ok(())
 }
 
+// ─── Screen capture (for the ff feedback shortcut) ─────────────────────────
+
+#[derive(Serialize)]
+struct ScreenCapture {
+    data_url: String,
+    width: u32,
+    height: u32,
+}
+
+/// Capture the primary display and return a base64-encoded PNG data URL.
+/// Uses the `xcap` crate which wraps the OS native capture APIs — no browser
+/// permission prompt needed, works reliably inside WKWebView.
+#[tauri::command]
+fn capture_primary_screen() -> Result<ScreenCapture, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let monitors = xcap::Monitor::all().map_err(|e| format!("monitors: {e}"))?;
+    let primary = monitors
+        .into_iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .ok_or_else(|| "no primary monitor".to_string())?;
+
+    let img = primary.capture_image().map_err(|e| format!("capture: {e}"))?;
+    let width = img.width();
+    let height = img.height();
+
+    // Encode to PNG in memory.
+    let mut png = Vec::with_capacity((width * height * 3) as usize);
+    {
+        let mut cursor = std::io::Cursor::new(&mut png);
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .map_err(|e| format!("png encode: {e}"))?;
+    }
+
+    let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&png));
+    Ok(ScreenCapture { data_url, width, height })
+}
+
 // ─── Clipboard (manual fallback) ────────────────────────────────────────────
 
 #[tauri::command]
@@ -367,6 +406,7 @@ pub fn run() {
             close_pane,
             close_all_panes,
             set_panes_visible,
+            capture_primary_screen,
             copy_creds,
         ])
         .run(tauri::generate_context!())

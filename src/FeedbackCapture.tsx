@@ -25,29 +25,15 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return false;
 }
 
-async function captureScreen(): Promise<{ dataUrl: string; blob: Blob; w: number; h: number } | null> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const constraints = { video: true, audio: false, preferCurrentTab: true, selfBrowserSurface: "include" } as any;
-  const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
-  const video = document.createElement("video");
-  video.muted = true;
-  video.playsInline = true;
-  video.srcObject = stream;
-  await new Promise<void>((resolve) => {
-    video.onloadedmetadata = async () => {
-      await video.play();
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    };
-  });
-  const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext("2d")!.drawImage(video, 0, 0);
-  stream.getTracks().forEach((t) => t.stop());
-  video.srcObject = null;
-  const blob: Blob | null = await new Promise((r) => canvas.toBlob(r, "image/png"));
-  if (!blob) return null;
-  return { dataUrl: canvas.toDataURL("image/png"), blob, w: canvas.width, h: canvas.height };
+// Capture via Tauri-side Rust command (xcap crate) — more reliable than
+// getDisplayMedia inside a WKWebView, and no browser permission prompt each time.
+// (The OS still prompts once for Screen Recording permission on macOS the
+// first time the app tries to capture — that prompt is at the system level.)
+async function captureScreen(): Promise<{ dataUrl: string; w: number; h: number } | null> {
+  const res = await invoke<{ dataUrl: string; width: number; height: number }>(
+    "capture_primary_screen",
+  );
+  return { dataUrl: res.dataUrl, w: res.width, h: res.height };
 }
 
 export function FeedbackCapture() {
@@ -99,6 +85,9 @@ export function FeedbackCapture() {
       await navigator.clipboard.write([new ClipboardItem({ "image/png": file })]);
       setCopiedToast("copied");
     } catch {
+      // Fallback if the browser ClipboardItem is locked down: read the file
+      // as blob URL and silently swallow. Toast shows "failed" — user can
+      // re-run (v2 could write the PNG to a temp file via Rust instead).
       setCopiedToast("failed");
     }
     setTimeout(() => setCopiedToast(null), 1800);
