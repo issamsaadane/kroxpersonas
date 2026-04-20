@@ -3,12 +3,22 @@
 // Reads .sig files produced by `tauri build` (createUpdaterArtifacts: true)
 // and writes a manifest pointing at the GitHub Release download URLs.
 //
+// Tauri 2 updater targets:
+//   Windows NSIS → the installer .exe IS the updater artefact,
+//                  signature lives in *.exe.sig.
+//   macOS  app   → the .app.tar.gz bundle is the updater artefact,
+//                  signature in *.app.tar.gz.sig.
+//
+// Artifact layout from actions/upload-artifact@v4: paths are anchored at the
+// longest common prefix, so macOS files land in artifacts/macos/dmg/ +
+// artifacts/macos/macos/. We recurse to find the .sig regardless of depth.
+//
 // Env:
 //   VERSION   — "v0.1.1" (refs/tags/<VERSION>)
 //   REPO      — "owner/repo"
 
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { join, basename } from "node:path";
 
 const VERSION = (process.env.VERSION ?? "").replace(/^v/, "");
 const REPO = process.env.REPO ?? "";
@@ -21,35 +31,45 @@ if (!VERSION || !REPO) {
 const releaseBase = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const pubDate = new Date().toISOString().replace(/\.\d+Z$/, "Z");
 
-function pick(dir, predicate) {
-  const entries = readdirSync(dir);
-  return entries.find(predicate) ?? null;
+function walk(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else out.push(full);
+  }
+  return out;
 }
 
-function readSig(path) {
-  return readFileSync(path, "utf8").trim();
+function findSig(dir, suffix) {
+  try {
+    return walk(dir).find((f) => f.endsWith(suffix)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
-const winSigFile = pick("artifacts/windows", (f) => f.endsWith(".nsis.zip.sig"));
-const macSigFile = pick("artifacts/macos",   (f) => f.endsWith(".app.tar.gz.sig"));
+const winSig = findSig("artifacts/windows", ".exe.sig");
+const macSig = findSig("artifacts/macos",   ".app.tar.gz.sig");
 
-if (!winSigFile) console.warn("⚠️  no Windows .nsis.zip.sig found in artifacts/windows");
-if (!macSigFile) console.warn("⚠️  no macOS .app.tar.gz.sig found in artifacts/macos");
-
-const winZipUrl = winSigFile ? `${releaseBase}/${winSigFile.replace(/\.sig$/, "")}` : null;
-const macTarUrl = macSigFile ? `${releaseBase}/${macSigFile.replace(/\.sig$/, "")}` : null;
+if (!winSig) console.warn("⚠️  no Windows .exe.sig found");
+if (!macSig) console.warn("⚠️  no macOS .app.tar.gz.sig found");
 
 const platforms = {};
-if (winSigFile) {
+
+if (winSig) {
+  const installer = basename(winSig).replace(/\.sig$/, "");
   platforms["windows-x86_64"] = {
-    signature: readSig(join("artifacts/windows", winSigFile)),
-    url: winZipUrl,
+    signature: readFileSync(winSig, "utf8").trim(),
+    url: `${releaseBase}/${installer}`,
   };
 }
-if (macSigFile) {
+
+if (macSig) {
+  const archive = basename(macSig).replace(/\.sig$/, "");
   platforms["darwin-aarch64"] = {
-    signature: readSig(join("artifacts/macos", macSigFile)),
-    url: macTarUrl,
+    signature: readFileSync(macSig, "utf8").trim(),
+    url: `${releaseBase}/${archive}`,
   };
 }
 
