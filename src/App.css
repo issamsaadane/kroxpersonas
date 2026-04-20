@@ -128,7 +128,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
-.main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.main { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
 
 .main-header {
   padding: 14px 18px;
@@ -146,6 +146,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   grid-template-columns: 260px 1fr;
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
   transition: grid-template-columns 180ms ease;
 }
 .app.rail-collapsed .main-body {

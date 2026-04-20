@@ -214,15 +214,34 @@ export default function App() {
   }, [config, panes, sidebarCollapsed, railCollapsed, ready]);
 
   // Workspace-size observer → keeps webviews aligned with HTML frames when the
-  // host window (or either sidebar) resizes.
+  // host window (or either sidebar) resizes. Also clamps pane frames to the
+  // new workspace size so panes never hang off the edge (which would cause
+  // a scrollbar, i.e. the "double scrolling" bug).
   useEffect(() => {
     const recalc = () => {
       const el = workspaceRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
       setWorkspaceBounds({ width: r.width, height: r.height });
-      // Re-sync every pane's webview to its (unchanged) HTML frame position.
-      for (const p of panesRef.current) {
+
+      let needsUpdate = false;
+      const clamped = panesRef.current.map((p) => {
+        const maxW = Math.max(MIN_W, r.width);
+        const maxH = Math.max(MIN_H, r.height);
+        const width  = Math.min(Math.max(MIN_W, p.frame.width),  maxW);
+        const height = Math.min(Math.max(MIN_H, p.frame.height), maxH);
+        const x = Math.max(0, Math.min(p.frame.x, r.width  - width));
+        const y = Math.max(0, Math.min(p.frame.y, r.height - height));
+        const frame = { x, y, width, height };
+        if (frame.x !== p.frame.x || frame.y !== p.frame.y ||
+            frame.width !== p.frame.width || frame.height !== p.frame.height) {
+          needsUpdate = true;
+        }
+        return { ...p, frame };
+      });
+      if (needsUpdate) setPanes(clamped);
+
+      for (const p of clamped) {
         const rect = webviewRect(p.frame, p.viewport, { left: r.left, top: r.top });
         setPaneBoundsRust(p.personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
       }

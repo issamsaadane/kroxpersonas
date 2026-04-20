@@ -55,10 +55,14 @@ export function FramedPane({
   }>(null);
 
   const clamp = (r: FrameRect): FrameRect => {
-    const width  = Math.max(MIN_W, r.width);
-    const height = Math.max(MIN_H, r.height);
-    const x = Math.max(0, Math.min(r.x, Math.max(0, workspaceBounds.width  - 40)));
-    const y = Math.max(0, Math.min(r.y, Math.max(0, workspaceBounds.height - TITLE_H)));
+    // Keep size within workspace bounds (never larger than the container) so
+    // a pane can't force the workspace to scroll.
+    const maxW = Math.max(MIN_W, workspaceBounds.width);
+    const maxH = Math.max(MIN_H, workspaceBounds.height);
+    const width  = Math.min(Math.max(MIN_W, r.width),  maxW);
+    const height = Math.min(Math.max(MIN_H, r.height), maxH);
+    const x = Math.max(0, Math.min(r.x, workspaceBounds.width  - width));
+    const y = Math.max(0, Math.min(r.y, workspaceBounds.height - height));
     return { x, y, width, height };
   };
 
