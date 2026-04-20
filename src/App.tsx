@@ -11,6 +11,7 @@ import {
   viewportLabel,
 } from "./FramedPane";
 import { FrameRect, tileLayout } from "./layout";
+import { FeedbackCapture } from "./FeedbackCapture";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -497,6 +498,8 @@ export default function App() {
       )}
 
       {toast && <div className="toast">{toast}</div>}
+
+      <FeedbackCapture />
     </div>
   );
 }
