@@ -87,9 +87,10 @@ fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
 
 // ─── Auto-login + Tauri-globals-strip init script ──────────────────────────
 
-fn init_script(email: &str, password: &str) -> String {
+fn init_script(email: &str, password: &str, touch_mode: bool) -> String {
     let email_js = serde_json::to_string(email).unwrap_or_else(|_| "\"\"".into());
     let pwd_js   = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".into());
+    let touch_mode_js = if touch_mode { "true" } else { "false" };
 
     format!(
         r#"
@@ -98,6 +99,54 @@ fn init_script(email: &str, password: &str) -> String {
   for (const k of TAURI_KEYS) {{
     try {{ delete window[k]; }} catch (e) {{}}
     try {{ Object.defineProperty(window, k, {{ value: undefined, writable: false, configurable: false }}); }} catch (e) {{}}
+  }}
+
+  // ─── Touch emulation — mouse events fire TouchEvents on mobile/tablet panes ─
+  if ({touch_mode_js}) {{
+    try {{
+      Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => 5, configurable: true }});
+    }} catch (e) {{}}
+    try {{
+      if (!('ontouchstart' in window)) {{
+        Object.defineProperty(window, 'ontouchstart', {{ value: null, configurable: true }});
+      }}
+    }} catch (e) {{}}
+
+    const TOUCH_SUPPORTED = typeof window.TouchEvent === 'function' && typeof window.Touch === 'function';
+    if (TOUCH_SUPPORTED) {{
+      let dragActive = false;
+      const makeTouch = (target, e) => new window.Touch({{
+        identifier: 1, target,
+        clientX: e.clientX, clientY: e.clientY,
+        screenX: e.screenX, screenY: e.screenY,
+        pageX: e.pageX,     pageY: e.pageY,
+        radiusX: 10, radiusY: 10, force: 1,
+      }});
+      const dispatch = (type, e, touches) => {{
+        const t = e.target instanceof Element ? e.target : document.body;
+        const touch = makeTouch(t, e);
+        const list = touches ? [touch] : [];
+        const evt = new window.TouchEvent(type, {{
+          bubbles: true, cancelable: true,
+          touches: list, targetTouches: list, changedTouches: [touch],
+        }});
+        t.dispatchEvent(evt);
+      }};
+      document.addEventListener('mousedown', (e) => {{
+        if (e.button !== 0) return;
+        dragActive = true;
+        dispatch('touchstart', e, true);
+      }}, true);
+      document.addEventListener('mousemove', (e) => {{
+        if (!dragActive) return;
+        dispatch('touchmove', e, true);
+      }}, true);
+      window.addEventListener('mouseup', (e) => {{
+        if (!dragActive) return;
+        dragActive = false;
+        dispatch('touchend', e, false);
+      }}, true);
+    }}
   }}
 
   if (window.__kroxPersonasInstalled) return;
@@ -182,6 +231,7 @@ fn webview_label(persona_id: &str) -> String {
 // ─── Commands: persona panes ───────────────────────────────────────────────
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn open_pane(
     app: AppHandle,
     state: State<'_, PaneState>,
@@ -193,6 +243,8 @@ fn open_pane(
     y: f64,
     width: f64,
     height: f64,
+    touch_mode: Option<bool>,
+    user_agent: Option<String>,
 ) -> Result<(), String> {
     let parsed = normalise_url(&url)?;
     let label = webview_label(&persona_id);
@@ -215,10 +267,14 @@ fn open_pane(
         .get_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
 
-    let script = init_script(&email, &password);
-    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+    let touch = touch_mode.unwrap_or(false);
+    let script = init_script(&email, &password, touch);
+    let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .incognito(true)
         .initialization_script(&script);
+    if let Some(ua) = user_agent.as_deref().filter(|s| !s.is_empty()) {
+        builder = builder.user_agent(ua);
+    }
 
     let webview = window
         .add_child(

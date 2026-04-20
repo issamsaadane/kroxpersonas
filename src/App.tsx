@@ -75,8 +75,24 @@ const initials = (name: string) =>
 
 async function saveConfig(c: Config)                { await invoke("save_config", { config: c }); }
 async function loadConfig(): Promise<Config>        { return await invoke<Config>("load_config"); }
-async function openPaneRust(instanceId: string, url: string, email: string, password: string, x: number, y: number, width: number, height: number) {
-  await invoke("open_pane", { personaId: instanceId, url, email, password, x, y, width, height });
+async function openPaneRust(
+  instanceId: string,
+  url: string,
+  email: string,
+  password: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  touchMode: boolean,
+  userAgent: string | null,
+) {
+  await invoke("open_pane", {
+    personaId: instanceId, url, email, password,
+    x, y, width, height,
+    touchMode,
+    userAgent: userAgent ?? null,
+  });
 }
 async function setPaneBoundsRust(instanceId: string, x: number, y: number, width: number, height: number) {
   await invoke("set_pane_bounds", { personaId: instanceId, x, y, width, height });
@@ -119,6 +135,25 @@ function framesIntersect(a: FrameRect, b: FrameRect): boolean {
            b.y + b.height <= a.y);
 }
 
+// ─── Device emulation: user-agent + touch-mode based on viewport ─────────
+
+type DeviceMode = "desktop" | "tablet" | "mobile";
+
+function deviceModeOf(v: Viewport): DeviceMode {
+  if (v === "fit") return "desktop";
+  const cat = VIEWPORT_PRESETS[v]?.category;
+  return (cat === "tablet" || cat === "mobile") ? cat : "desktop";
+}
+
+const UA_IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
+const UA_IPAD   = "Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
+
+function uaFor(mode: DeviceMode): string | null {
+  if (mode === "mobile") return UA_IPHONE;
+  if (mode === "tablet") return UA_IPAD;
+  return null;   // desktop: default UA
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -158,9 +193,11 @@ export default function App() {
             const persona = proj?.personas.find((u) => u.id === pane.personaId);
             if (!proj || !persona) continue;
             const rect = webviewRect(pane.frame, pane.viewport, { left: ws.left, top: ws.top });
+            const mode = deviceModeOf(pane.viewport);
             await openPaneRust(
               pane.instanceId, proj.serverUrl, persona.email, persona.password,
               rect.x, rect.y, rect.width, rect.height,
+              mode !== "desktop", uaFor(mode),
             ).catch(() => {});
           }
         }));
@@ -341,8 +378,12 @@ export default function App() {
     const newZ = zTop + 1;
     const rect = webviewRect(frame, "fit", { left: ws.left, top: ws.top });
     try {
-      await openPaneRust(instanceId, activeProject.serverUrl, u.email, u.password,
-        rect.x, rect.y, rect.width, rect.height);
+      await openPaneRust(
+        instanceId, activeProject.serverUrl, u.email, u.password,
+        rect.x, rect.y, rect.width, rect.height,
+        false,    // fit opens as desktop — viewport switch rebuilds if needed
+        null,
+      );
       setZTop(newZ);
       setPanes((prev) => [...prev, {
         instanceId, personaId: u.id, projectId: activeProject.id,
@@ -386,30 +427,54 @@ export default function App() {
     setPanes((prev) => prev.filter((p) => p.instanceId !== instanceId));
   };
 
-  const handleSetViewport = (instanceId: string, viewport: Viewport) => {
-    setPanes((prev) => prev.map((p) => {
-      if (p.instanceId !== instanceId) return p;
-      const next: OpenPane = { ...p, viewport };
-      if (viewport !== "fit") {
-        const preset = VIEWPORT_PRESETS[viewport];
-        if (preset) {
-          next.frame = {
-            ...p.frame,
-            width:  preset.w + EDGE,
-            height: preset.h + TITLE_H + EDGE,
-          };
-        }
+  const handleSetViewport = async (instanceId: string, viewport: Viewport) => {
+    const before = panesRef.current.find((x) => x.instanceId === instanceId);
+    if (!before) return;
+    const beforeMode = deviceModeOf(before.viewport);
+    const afterMode  = deviceModeOf(viewport);
+    const categoryChanged = beforeMode !== afterMode;
+
+    // Update React state first so the frame resizes to match the preset.
+    let nextFrame = before.frame;
+    if (viewport !== "fit") {
+      const preset = VIEWPORT_PRESETS[viewport];
+      if (preset) {
+        nextFrame = {
+          ...before.frame,
+          width:  preset.w + EDGE,
+          height: preset.h + TITLE_H + EDGE,
+        };
       }
-      return next;
-    }));
+    }
+    setPanes((prev) => prev.map((p) =>
+      p.instanceId === instanceId ? { ...p, viewport, frame: nextFrame } : p));
+
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
-    setTimeout(() => {
-      const p = panesRef.current.find((x) => x.instanceId === instanceId);
-      if (!p) return;
-      const rect = webviewRect(p.frame, p.viewport, { left: ws.left, top: ws.top });
-      setPaneBoundsRust(instanceId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
-    }, 0);
+
+    // Category didn't change → just resize the existing webview.
+    if (!categoryChanged) {
+      setTimeout(() => {
+        const rect = webviewRect(nextFrame, viewport, { left: ws.left, top: ws.top });
+        setPaneBoundsRust(instanceId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
+      }, 0);
+      return;
+    }
+
+    // Category changed (desktop ↔ mobile / tablet) — UA + touch-mode must be
+    // different, and those are only settable at webview creation. Close the
+    // current webview and reopen with the new mode in the same instance slot.
+    const proj    = config.projects.find((p) => p.id === before.projectId);
+    const persona = proj?.personas.find((u) => u.id === before.personaId);
+    if (!proj || !persona) return;
+
+    await closePaneRust(instanceId).catch(() => {});
+    const rect = webviewRect(nextFrame, viewport, { left: ws.left, top: ws.top });
+    await openPaneRust(
+      instanceId, proj.serverUrl, persona.email, persona.password,
+      rect.x, rect.y, rect.width, rect.height,
+      afterMode !== "desktop", uaFor(afterMode),
+    ).catch((err) => pushToast(`Switch failed: ${err instanceof Error ? err.message : String(err)}`));
   };
 
   // ── Derived ───────────────────────────────────────────────────────────────
