@@ -1,5 +1,6 @@
-import { useEffect, useState, useMemo, FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { FramedPane, FrameRect, TITLE_H, BOTTOM_H, MIN_W, MIN_H } from "./FramedPane";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -8,7 +9,7 @@ interface Persona {
   name: string;
   email: string;
   password: string;
-  label: string; // user type label, e.g. "admin" | "editor"
+  label: string;
 }
 
 interface Project {
@@ -20,6 +21,13 @@ interface Project {
 
 interface Config {
   projects: Project[];
+}
+
+interface OpenPane {
+  personaId: string;
+  projectId: string;
+  frame: FrameRect;
+  zIndex: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -40,23 +48,51 @@ const initials = (name: string) =>
 async function saveConfig(c: Config) {
   await invoke("save_config", { config: c });
 }
-
 async function loadConfig(): Promise<Config> {
   return await invoke<Config>("load_config");
 }
-
-async function launchPersona(
+async function openPaneRust(
   personaId: string,
-  personaName: string,
   url: string,
   email: string,
   password: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
 ) {
-  await invoke("launch_persona", { personaId, personaName, url, email, password });
+  await invoke("open_pane", { personaId, url, email, password, x, y, width, height });
+}
+async function setPaneBoundsRust(
+  personaId: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  await invoke("set_pane_bounds", { personaId, x, y, width, height });
+}
+async function closePaneRust(personaId: string) {
+  await invoke("close_pane", { personaId });
+}
+async function closeAllPanesRust() {
+  await invoke("close_all_panes");
+}
+async function copyCreds(email: string, password: string) {
+  await invoke("copy_creds", { email, password });
 }
 
-async function copyCredentials(email: string, password: string) {
-  await invoke("copy_creds", { email, password });
+// Convert a frame's local workspace coords into the webview rect (absolute in main window).
+function frameToWebviewRect(
+  frame: FrameRect,
+  workspaceRect: DOMRect,
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: Math.round(workspaceRect.left + frame.x),
+    y: Math.round(workspaceRect.top + frame.y + TITLE_H),
+    width:  Math.max(1, Math.round(frame.width)),
+    height: Math.max(1, Math.round(frame.height - TITLE_H - BOTTOM_H)),
+  };
 }
 
 // ─── Modal ───────────────────────────────────────────────────────────────────
@@ -95,7 +131,12 @@ export default function App() {
   const [toast, setToast]               = useState<string | null>(null);
   const [ready, setReady]               = useState(false);
 
-  // Load config on boot
+  const [panes, setPanes]               = useState<OpenPane[]>([]);
+  const [zTop, setZTop]                 = useState(10);
+  const [workspaceBounds, setWorkspaceBounds] = useState({ width: 800, height: 600 });
+  const workspaceRef                    = useRef<HTMLDivElement | null>(null);
+
+  // Load config
   useEffect(() => {
     loadConfig()
       .then((c) => {
@@ -103,6 +144,8 @@ export default function App() {
         if (c.projects.length && !activeId) setActiveId(c.projects[0].id);
       })
       .finally(() => setReady(true));
+    // On app close, drop any lingering webviews from the last run.
+    return () => { closeAllPanesRust().catch(() => {}); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -111,6 +154,33 @@ export default function App() {
     if (!ready) return;
     saveConfig(config).catch(console.error);
   }, [config, ready]);
+
+  // Keep workspace bounds in sync on layout changes.
+  useEffect(() => {
+    const recalc = () => {
+      const el = workspaceRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      setWorkspaceBounds({ width: r.width, height: r.height });
+      // Reposition any open panes so their webviews stay aligned with the moving HTML frame.
+      setPanes((prev) => {
+        prev.forEach((p) => {
+          const rect = frameToWebviewRect(p.frame, r);
+          setPaneBoundsRust(p.personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
+        });
+        return prev;
+      });
+    };
+    recalc();
+    const ro = new ResizeObserver(recalc);
+    if (workspaceRef.current) ro.observe(workspaceRef.current);
+    window.addEventListener("resize", recalc);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", recalc);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activeProject = useMemo(
     () => config.projects.find((p) => p.id === activeId) ?? null,
@@ -139,6 +209,12 @@ export default function App() {
   };
   const deleteProject = (id: string) => {
     if (!confirm("Delete this project and all its personas? This cannot be undone.")) return;
+    // Close any open panes belonging to this project.
+    setPanes((prev) => {
+      const drop = prev.filter((p) => p.projectId === id);
+      drop.forEach((p) => closePaneRust(p.personaId).catch(() => {}));
+      return prev.filter((p) => p.projectId !== id);
+    });
     setConfig((c) => ({ ...c, projects: c.projects.filter((p) => p.id !== id) }));
     if (activeId === id) setActiveId(null);
   };
@@ -171,6 +247,8 @@ export default function App() {
   const deletePersona = (id: string) => {
     if (!activeProject) return;
     if (!confirm("Delete this persona?")) return;
+    closePaneRust(id).catch(() => {});
+    setPanes((prev) => prev.filter((p) => p.personaId !== id));
     setConfig((c) => ({
       ...c,
       projects: c.projects.map((p) =>
@@ -179,12 +257,52 @@ export default function App() {
     }));
   };
 
-  // ── launch ────────────────────────────────────────────────────────────────
+  // ── pane lifecycle ────────────────────────────────────────────────────────
+
+  const defaultFrame = (): FrameRect => {
+    // Cascade placement: each new pane offsets from the previous one.
+    const count = panes.length;
+    const baseX = 40 + (count % 6) * 32;
+    const baseY = 40 + (count % 6) * 32;
+    const width  = Math.min(920, Math.max(MIN_W, workspaceBounds.width - baseX - 40));
+    const height = Math.min(700, Math.max(MIN_H, workspaceBounds.height - baseY - 40));
+    return { x: baseX, y: baseY, width, height };
+  };
 
   const handleLaunch = async (u: Persona) => {
     if (!activeProject) return;
+    const existing = panes.find((p) => p.personaId === u.id);
+    if (existing) {
+      // Already open — just bring to front.
+      setZTop((z) => {
+        const next = z + 1;
+        setPanes((prev) => prev.map((p) => p.personaId === u.id ? { ...p, zIndex: next } : p));
+        return next;
+      });
+      pushToast(`${u.name} is already open`);
+      return;
+    }
+    const ws = workspaceRef.current?.getBoundingClientRect();
+    if (!ws) return;
+    const frame = defaultFrame();
+    const rect = frameToWebviewRect(frame, ws);
+
     try {
-      await launchPersona(u.id, u.name, activeProject.serverUrl, u.email, u.password);
+      await openPaneRust(
+        u.id,
+        activeProject.serverUrl,
+        u.email,
+        u.password,
+        rect.x, rect.y, rect.width, rect.height,
+      );
+      const newZ = zTop + 1;
+      setZTop(newZ);
+      setPanes((prev) => [...prev, {
+        personaId: u.id,
+        projectId: activeProject.id,
+        frame,
+        zIndex: newZ,
+      }]);
       pushToast(`Launching ${u.name}…`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -194,11 +312,32 @@ export default function App() {
 
   const handleCopy = async (u: Persona) => {
     try {
-      await copyCredentials(u.email, u.password);
-      pushToast(`Copied ${u.email} creds to clipboard`);
+      await copyCreds(u.email, u.password);
+      pushToast(`Copied ${u.email} creds`);
     } catch {
       pushToast("Copy failed");
     }
+  };
+
+  const handlePaneMove = (personaId: string, frame: FrameRect) => {
+    setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, frame } : p)));
+    const ws = workspaceRef.current?.getBoundingClientRect();
+    if (!ws) return;
+    const r = frameToWebviewRect(frame, ws);
+    setPaneBoundsRust(personaId, r.x, r.y, r.width, r.height).catch(() => {});
+  };
+
+  const handlePaneFocus = (personaId: string) => {
+    setZTop((z) => {
+      const next = z + 1;
+      setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, zIndex: next } : p)));
+      return next;
+    });
+  };
+
+  const handlePaneClose = (personaId: string) => {
+    closePaneRust(personaId).catch(() => {});
+    setPanes((prev) => prev.filter((p) => p.personaId !== personaId));
   };
 
   // ── grouping for active project ───────────────────────────────────────────
@@ -214,6 +353,18 @@ export default function App() {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([label, users]) => ({ label, users }));
   }, [activeProject]);
+
+  // Helper: is a persona currently open?
+  const isOpen = (id: string) => panes.some((p) => p.personaId === id);
+
+  // Resolve persona + project for each pane (for title display).
+  const paneInfo = (personaId: string) => {
+    for (const proj of config.projects) {
+      const u = proj.personas.find((x) => x.id === personaId);
+      if (u) return { user: u, project: proj };
+    }
+    return null;
+  };
 
   // ── render ────────────────────────────────────────────────────────────────
 
@@ -252,7 +403,7 @@ export default function App() {
       {/* Main */}
       <main className="main">
         {!activeProject && (
-          <div className="empty" style={{ margin: "auto" }}>
+          <div className="workspace-empty">
             {config.projects.length === 0
               ? "Create a project to get started."
               : "Select a project on the left."}
@@ -280,44 +431,77 @@ export default function App() {
             </header>
 
             <div className="main-body">
-              {activeProject.personas.length === 0 && (
-                <div className="empty">No personas yet. Add one to start launching.</div>
-              )}
-              {grouped.map(({ label, users }) => (
-                <section key={label} className="group">
-                  <div className="group-head">
-                    <div className="label">{label}</div>
-                    <div className="divider" />
-                  </div>
-                  <div className="user-grid">
-                    {users.map((u) => (
-                      <div className="user-card" key={u.id}>
-                        <div className="head">
-                          <div className="avatar">{initials(u.name)}</div>
-                          <div className="who">
-                            <div className="name">{u.name}</div>
-                            <div className="email">{u.email}</div>
+              <aside className="persona-rail">
+                {activeProject.personas.length === 0 && (
+                  <div className="empty">No personas yet.</div>
+                )}
+                {grouped.map(({ label, users }) => (
+                  <section key={label} className="group">
+                    <div className="group-head">
+                      <div className="label">{label}</div>
+                    </div>
+                    <div className="persona-list">
+                      {users.map((u) => {
+                        const open = isOpen(u.id);
+                        return (
+                          <div className={`persona-row ${open ? "open" : ""}`} key={u.id}>
+                            <div className="avatar">{initials(u.name)}</div>
+                            <div className="who">
+                              <div className="name">{u.name}</div>
+                              <div className="email">{u.email}</div>
+                            </div>
+                            <div className="row-actions">
+                              {open ? (
+                                <button className="btn danger-text small" onClick={() => handlePaneClose(u.id)} title="Close pane">
+                                  Close
+                                </button>
+                              ) : (
+                                <button className="btn primary small" onClick={() => handleLaunch(u)} title="Open pane">
+                                  Launch
+                                </button>
+                              )}
+                              <button className="btn small" onClick={() => handleCopy(u)} title="Copy credentials">
+                                ⧉
+                              </button>
+                              <button className="btn small" onClick={() => setUserModal({ mode: "edit", u })} title="Edit persona">
+                                …
+                              </button>
+                              <button className="btn danger-text small" onClick={() => deletePersona(u.id)} title="Delete persona">
+                                ×
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                        <div className="actions">
-                          <button className="btn primary" onClick={() => handleLaunch(u)}>
-                            Launch
-                          </button>
-                          <button className="btn" onClick={() => handleCopy(u)}>
-                            Copy
-                          </button>
-                          <button className="btn" onClick={() => setUserModal({ mode: "edit", u })}>
-                            Edit
-                          </button>
-                          <button className="btn danger-text" onClick={() => deletePersona(u.id)}>
-                            Del
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </aside>
+
+              <section className="workspace" ref={workspaceRef}>
+                {panes.length === 0 && (
+                  <div className="workspace-empty">
+                    Click <strong>Launch</strong> on any persona to open it here.
                   </div>
-                </section>
-              ))}
+                )}
+                {panes.map((p) => {
+                  const info = paneInfo(p.personaId);
+                  if (!info) return null;
+                  return (
+                    <FramedPane
+                      key={p.personaId}
+                      title={info.user.name}
+                      subtitle={info.user.label}
+                      frame={p.frame}
+                      zIndex={p.zIndex}
+                      workspaceBounds={workspaceBounds}
+                      onMove={(frame) => handlePaneMove(p.personaId, frame)}
+                      onFocus={() => handlePaneFocus(p.personaId)}
+                      onClose={() => handlePaneClose(p.personaId)}
+                    />
+                  );
+                })}
+              </section>
             </div>
           </>
         )}
@@ -380,7 +564,6 @@ function ProjectForm({
         <div className="field">
           <label>Server URL</label>
           <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:3000" />
-          <p className="hint">Personas launch relative to this URL (e.g. /login).</p>
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
@@ -432,7 +615,6 @@ function PersonaForm({
         <div className="field">
           <label>User type / label</label>
           <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="admin / editor / viewer" />
-          <p className="hint">Free-form label used only to group personas in the dashboard.</p>
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>Cancel</button>

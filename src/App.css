@@ -4,7 +4,9 @@
   --bg:          #0e0e10;
   --surface:     #17171a;
   --surface-2:   #1f1f23;
+  --surface-3:   #26262b;
   --border:      rgba(255,255,255,0.08);
+  --border-2:    rgba(255,255,255,0.12);
   --text:        #eaeaea;
   --text-dim:    rgba(234,234,234,0.55);
   --text-faint:  rgba(234,234,234,0.3);
@@ -21,12 +23,11 @@
 
 html, body, #root { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); overflow: hidden; }
-
 button { font: inherit; color: inherit; cursor: pointer; }
 
 .app {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 220px 1fr;
   height: 100vh;
 }
 
@@ -81,6 +82,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border-top: 1px solid var(--border);
   display: flex; gap: 6px;
 }
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+
 .btn {
   padding: 7px 10px;
   border-radius: 8px;
@@ -88,6 +92,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: var(--surface-2);
   color: var(--text);
   font-size: 12px;
+  line-height: 1;
 }
 .btn:hover { background: rgba(255,255,255,0.06); }
 .btn.primary {
@@ -99,74 +104,187 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .btn.primary:hover { opacity: 0.9; }
 .btn.danger-text { color: var(--danger); }
 .btn.full { flex: 1; }
+.btn.small { padding: 4px 7px; font-size: 11px; border-radius: 6px; }
 
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
-.main { display: flex; flex-direction: column; min-height: 0; }
+.main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 
 .main-header {
-  padding: 16px 20px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--border);
   display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
+  flex-shrink: 0;
 }
-.main-header .title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
-.main-header .url   { font-size: 11px; color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.main-header .title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.main-header .url   { font-size: 10.5px; color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .main-header .actions { display: flex; gap: 6px; }
 
 .main-body {
   flex: 1;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* ── Persona rail ─────────────────────────────────────────────────────── */
+
+.persona-rail {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 10px;
+  min-width: 0;
 }
 
-.empty {
-  text-align: center;
-  padding: 60px 20px;
-  color: var(--text-faint);
-  font-size: 12px;
-}
-
-/* ── User groups ───────────────────────────────────────────────────────── */
-
-.group { margin-bottom: 22px; }
-.group-head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 0 2px 8px;
-}
+.group { margin-bottom: 14px; }
+.group-head { padding: 4px 6px 6px; }
 .group-head .label {
   font-size: 10px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-faint);
 }
-.group-head .divider { flex: 1; height: 1px; background: var(--border); }
 
-.user-grid {
+.persona-list { display: flex; flex-direction: column; gap: 4px; }
+
+.persona-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: var(--gap);
+  grid-template-columns: 28px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  transition: background 120ms, border-color 120ms;
+  min-width: 0;
+}
+.persona-row:hover { background: var(--surface-3); }
+.persona-row.open {
+  background: var(--surface-3);
+  border-color: color-mix(in srgb, var(--primary) 40%, transparent);
 }
 
-.user-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  display: flex; flex-direction: column; gap: 10px;
-}
-.user-card .head { display: flex; align-items: center; gap: 10px; }
-.user-card .avatar {
-  width: 32px; height: 32px;
+.persona-row .avatar {
+  width: 28px; height: 28px;
   border-radius: 999px;
   background: linear-gradient(135deg, #7c5cff, #41b3ff);
   color: #fff;
   display: grid; place-items: center;
-  font-weight: 600; font-size: 12px;
+  font-weight: 600; font-size: 11px;
+  flex-shrink: 0;
 }
-.user-card .who { flex: 1; min-width: 0; }
-.user-card .who .name   { font-weight: 600; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.user-card .who .email  { font-size: 11px; color: var(--text-dim); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.user-card .actions { display: flex; gap: 6px; margin-top: auto; }
-.user-card .actions .btn { flex: 1; justify-content: center; }
+
+.persona-row .who { min-width: 0; }
+.persona-row .who .name  { font-size: 12px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.persona-row .who .email { font-size: 10.5px; color: var(--text-dim); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+
+.persona-row .row-actions { display: flex; gap: 3px; }
+
+.empty {
+  text-align: center;
+  padding: 24px 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* ── Workspace (pane host) ────────────────────────────────────────────── */
+
+.workspace {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(255,255,255,0.035) 1px, transparent 0) 0 0 / 20px 20px,
+    var(--bg);
+  min-width: 0;
+}
+
+.workspace-empty {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* ── Framed pane (single persona) ─────────────────────────────────────── */
+
+.pane {
+  position: absolute;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-top-width: 2px;
+  border-top-style: solid;
+  border-radius: 10px;
+  box-shadow:
+    0 2px 4px rgba(0,0,0,0.25),
+    0 14px 40px rgba(0,0,0,0.35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  will-change: transform, width, height;
+}
+
+.pane-title {
+  height: 36px;
+  background: linear-gradient(180deg, var(--surface-3), var(--surface-2));
+  border-bottom: 1px solid var(--border);
+  padding: 0 10px;
+  display: flex; align-items: center; gap: 10px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.pane-title:active { cursor: grabbing; }
+.pane-title-name {
+  font-size: 12px; font-weight: 600;
+  white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+}
+.pane-title-sub {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pane-close {
+  margin-left: auto;
+  width: 20px; height: 20px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+  font-size: 14px; line-height: 1;
+  display: grid; place-items: center;
+}
+.pane-close:hover { background: var(--danger); color: #fff; }
+
+.pane-slot {
+  flex: 1;
+  background: #000;           /* dark matte while the webview loads */
+  pointer-events: none;        /* native webview on top owns events */
+  min-height: 0;
+}
+
+.pane-bottom {
+  height: 16px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  position: relative;
+}
+
+.pane-resize {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 16px; height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 38%, rgba(255,255,255,0.18) 40%, rgba(255,255,255,0.18) 46%, transparent 48%,
+    transparent 58%, rgba(255,255,255,0.18) 60%, rgba(255,255,255,0.18) 66%, transparent 68%);
+  touch-action: none;
+}
 
 /* ── Modal ─────────────────────────────────────────────────────────────── */
 
@@ -174,7 +292,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   position: fixed; inset: 0;
   background: rgba(0,0,0,0.5);
   display: grid; place-items: center;
-  z-index: 100;
+  z-index: 1000;
 }
 .modal {
   background: var(--surface);
@@ -212,5 +330,5 @@ button { font: inherit; color: inherit; cursor: pointer; }
   padding: 8px 16px;
   font-size: 12px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-  z-index: 200;
+  z-index: 2000;
 }

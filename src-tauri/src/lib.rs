@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
 
 // ─── Config types (mirror src/App.tsx) ──────────────────────────────────────
 
@@ -71,25 +71,16 @@ fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
     Ok(())
 }
 
-// ─── Commands: launch persona (native webview inside KroxPersonas) ─────────
+// ─── Auto-login + Tauri-globals-strip init script ──────────────────────────
 
-/// Build the auto-login initialisation script. Runs on every page load in the
-/// persona's webview — polls for an email + password field and submits.
-/// Quietly no-ops on pages without a login form, so subsequent navigation is unaffected.
-fn auto_login_script(email: &str, password: &str) -> String {
-    // Escape the creds safely for embedding in a JS string literal.
+fn init_script(email: &str, password: &str) -> String {
     let email_js = serde_json::to_string(email).unwrap_or_else(|_| "\"\"".into());
     let pwd_js   = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".into());
 
     format!(
         r#"
 (() => {{
-  // ── Strip Tauri globals ───────────────────────────────────────────────
-  // Persona windows are Tauri webviews, so the host auto-injects
-  // __TAURI__ / __TAURI_INTERNALS__ / etc. Apps that detect these (e.g.
-  // KroxFlow's topbar) will try to call desktop-only APIs and crash.
-  // Delete them before any page scripts run so the target app sees a
-  // plain browser environment.
+  // Strip Tauri globals so the target app sees a plain browser env.
   const TAURI_KEYS = ['__TAURI__','__TAURI_INTERNALS__','__TAURI_INVOKE__','__TAURI_METADATA__','__TAURI_IPC__','__TAURI_POST_MESSAGE__','__TAURI_PATTERN__','__TAURI_EVENT_PLUGIN_INTERNALS__'];
   for (const k of TAURI_KEYS) {{
     try {{ delete window[k]; }} catch (e) {{}}
@@ -100,7 +91,7 @@ fn auto_login_script(email: &str, password: &str) -> String {
   window.__kroxPersonasInstalled = true;
   const EMAIL = {email};
   const PWD   = {pwd};
-  const MAX_TRIES = 60;       // ~12s at 200ms interval
+  const MAX_TRIES = 60;
   let tries = 0;
   let submitted = false;
 
@@ -131,18 +122,13 @@ fn auto_login_script(email: &str, password: &str) -> String {
     if (tries < MAX_TRIES) setTimeout(tryFill, 200);
   }};
 
-  const kick = () => {{
-    tries = 0;
-    submitted = false;
-    tryFill();
-  }};
+  const kick = () => {{ tries = 0; submitted = false; tryFill(); }};
 
   if (document.readyState === 'loading') {{
     document.addEventListener('DOMContentLoaded', kick);
   }} else {{
     kick();
   }}
-  // SPA route changes — re-run in case the login form mounts later.
   const push = history.pushState;
   history.pushState = function(...a) {{ push.apply(this, a); setTimeout(kick, 100); }};
   window.addEventListener('popstate', () => setTimeout(kick, 100));
@@ -153,66 +139,125 @@ fn auto_login_script(email: &str, password: &str) -> String {
     )
 }
 
+// ─── URL normalisation ─────────────────────────────────────────────────────
+
+fn normalise_url(raw: &str) -> Result<tauri::Url, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Server URL is empty — set one on the project first.".into());
+    }
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    with_scheme
+        .parse::<tauri::Url>()
+        .map_err(|e| format!("invalid URL '{with_scheme}': {e}"))
+}
+
+// ─── Commands: persona panes (child webviews of the main window) ──────────
+
+fn webview_label(persona_id: &str) -> String {
+    format!(
+        "persona-{}",
+        persona_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>()
+    )
+}
+
+/// Open a persona as a child webview of the main window at the given bounds.
+/// Position and size are in logical (CSS) pixels, relative to the main window's content area.
 #[tauri::command]
-fn launch_persona(
+fn open_pane(
     app: AppHandle,
     persona_id: String,
-    persona_name: String,
     url: String,
     email: String,
     password: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 ) -> Result<(), String> {
-    let url = url.trim();
-    if url.is_empty() {
-        return Err("Server URL is empty — set one on the project first.".into());
-    }
-    // Allow bare hostnames like "localhost:3000" or "app.example.com" by
-    // defaulting to http:// when no scheme is present.
-    let normalised = if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("http://{url}")
-    };
-    let parsed = normalised
-        .parse::<tauri::Url>()
-        .map_err(|e| format!("invalid URL '{normalised}': {e}"))?;
+    let parsed = normalise_url(&url)?;
+    let label = webview_label(&persona_id);
 
-    // Unique window label per persona — relaunch replaces the previous window.
-    let label = format!("persona-{}", sanitize_label(&persona_id));
-    if let Some(existing) = app.get_webview_window(&label) {
-        let _ = existing.close();
+    // Idempotent: if already open, just move/resize.
+    if let Some(existing) = app.webviews().get(&label).cloned() {
+        let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.set_size(LogicalSize::new(width, height));
+        return Ok(());
     }
 
-    let script = auto_login_script(&email, &password);
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
 
-    // `incognito(true)` gives each persona its own ephemeral cookie jar / web
-    // storage. Cookies are dropped when the window closes, so the auto-login
-    // script re-authenticates on every launch — which is exactly what we want
-    // for side-by-side persona testing.
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
-        .title(format!("{persona_name} — {}", persona_id_short(&persona_id)))
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(560.0, 480.0)
-        .resizable(true)
+    let script = init_script(&email, &password);
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .incognito(true)
-        .initialization_script(&script)
-        .build()
-        .map_err(|e| format!("build persona window: {e}"))?;
+        .initialization_script(&script);
+
+    window
+        .add_child(
+            builder,
+            LogicalPosition::new(x, y),
+            LogicalSize::new(width, height),
+        )
+        .map_err(|e| format!("add_child: {e}"))?;
 
     Ok(())
 }
 
-/// Close an open persona window (by id). No-op if it isn't open.
 #[tauri::command]
-fn close_persona(app: AppHandle, persona_id: String) -> Result<(), String> {
-    let label = format!("persona-{}", sanitize_label(&persona_id));
-    if let Some(win) = app.get_webview_window(&label) {
-        win.close().map_err(|e| format!("close: {e}"))?;
+fn set_pane_bounds(
+    app: AppHandle,
+    persona_id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let label = webview_label(&persona_id);
+    let webview = app
+        .webviews()
+        .get(&label)
+        .cloned()
+        .ok_or_else(|| format!("pane {label} not open"))?;
+    let _ = webview.set_position(LogicalPosition::new(x, y));
+    let _ = webview.set_size(LogicalSize::new(width, height));
+    Ok(())
+}
+
+#[tauri::command]
+fn close_pane(app: AppHandle, persona_id: String) -> Result<(), String> {
+    let label = webview_label(&persona_id);
+    if let Some(webview) = app.webviews().get(&label).cloned() {
+        webview.close().map_err(|e| format!("close: {e}"))?;
     }
     Ok(())
 }
 
-// ─── Clipboard (fallback "Copy creds" button) ───────────────────────────────
+#[tauri::command]
+fn close_all_panes(app: AppHandle) -> Result<(), String> {
+    let labels: Vec<String> = app
+        .webviews()
+        .keys()
+        .filter(|k| k.starts_with("persona-"))
+        .cloned()
+        .collect();
+    for label in labels {
+        if let Some(w) = app.webviews().get(&label).cloned() {
+            let _ = w.close();
+        }
+    }
+    Ok(())
+}
+
+// ─── Clipboard (manual fallback) ────────────────────────────────────────────
 
 #[tauri::command]
 fn copy_creds(email: String, password: String) -> Result<(), String> {
@@ -274,18 +319,6 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-// ─── Small helpers ──────────────────────────────────────────────────────────
-
-fn sanitize_label(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect()
-}
-
-fn persona_id_short(s: &str) -> String {
-    s.chars().take(6).collect()
-}
-
 // ─── Entry ──────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -294,8 +327,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
-            launch_persona,
-            close_persona,
+            open_pane,
+            set_pane_bounds,
+            close_pane,
+            close_all_panes,
             copy_creds,
         ])
         .run(tauri::generate_context!())
