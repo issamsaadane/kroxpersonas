@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/>
+      <stop offset="1" stop-color="#db2777"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#g)"/>
+  <text x="512" y="560" text-anchor="middle" dominant-baseline="middle"
+        font-family="-apple-system, SF Pro Display, Helvetica Neue, Arial, sans-serif"
+        font-size="680" font-weight="800" fill="#ffffff" letter-spacing="-30">P</text>
+</svg>
