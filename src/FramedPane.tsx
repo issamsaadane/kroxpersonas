@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { FrameRect } from "./layout";
 
 export const TITLE_H = 36;
@@ -36,30 +36,18 @@ export function viewportLabel(v: Viewport): string {
   return VIEWPORT_PRESETS[v]?.label ?? v;
 }
 
-const CATEGORY_ORDER: Category[] = ["desktop", "tablet", "mobile"];
-const CATEGORY_TITLE: Record<Category, string> = {
-  desktop: "Desktop",
-  tablet: "Tablet",
-  mobile: "Mobile",
-};
-const CATEGORY_ICON: Record<Category, string> = {
-  desktop: "🖥",
-  tablet: "📱",
-  mobile: "📱",
-};
+// (category helpers moved to App.tsx / DevicePicker)
 
 interface Props {
   title: string;
   subtitle?: string;
   frame: FrameRect;
   zIndex: number;
-  viewport: Viewport;
   workspaceBounds: { width: number; height: number };
   otherFrames: FrameRect[];
   onMove: (rect: FrameRect) => void;
   onFocus: () => void;
   onClose: () => void;
-  onSetViewport: (v: Viewport) => void;
 }
 
 const SNAP = 8;
@@ -79,13 +67,11 @@ export function FramedPane({
   subtitle,
   frame,
   zIndex,
-  viewport,
   workspaceBounds,
   otherFrames,
   onMove,
   onFocus,
   onClose,
-  onSetViewport,
 }: Props) {
   const dragRef = useRef<null | {
     mode: "move" | "resize";
@@ -247,9 +233,6 @@ export function FramedPane({
       <div className="pane-title" onPointerDown={onTitleDown}>
         <span className="pane-title-name">{title}</span>
         {subtitle && <span className="pane-title-sub">{subtitle}</span>}
-
-        <ViewportPicker current={viewport} onPick={onSetViewport} />
-
         <button
           className="pane-close"
           onPointerDown={(e) => e.stopPropagation()}
@@ -271,82 +254,5 @@ export function FramedPane({
   );
 }
 
-// ─── Viewport picker dropdown ──────────────────────────────────────────────
-
-function ViewportPicker({
-  current,
-  onPick,
-}: {
-  current: Viewport;
-  onPick: (v: Viewport) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  const grouped = CATEGORY_ORDER.map((cat) => ({
-    cat,
-    presets: Object.entries(VIEWPORT_PRESETS)
-      .filter(([, p]) => p.category === cat)
-      .map(([key, p]) => ({ key, ...p })),
-  }));
-
-  const currentDef = current === "fit" ? null : VIEWPORT_PRESETS[current];
-
-  return (
-    <div className="pane-viewport" ref={ref}>
-      <button
-        className="vp-trigger"
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        title={viewportLabel(current)}
-      >
-        <span className="vp-icon">
-          {current === "fit" ? "⤢" : CATEGORY_ICON[currentDef!.category]}
-        </span>
-        <span className="vp-label">{viewportLabel(current)}</span>
-        {currentDef && (
-          <span className="vp-dims">{currentDef.w}×{currentDef.h}</span>
-        )}
-        <span className="vp-caret">▾</span>
-      </button>
-
-      {open && (
-        <div className="vp-menu" onPointerDown={(e) => e.stopPropagation()}>
-          <button
-            className={`vp-item ${current === "fit" ? "on" : ""}`}
-            onClick={() => { onPick("fit"); setOpen(false); }}
-          >
-            <span className="vp-item-icon">⤢</span>
-            <span className="vp-item-label">Fit pane</span>
-            <span className="vp-item-dims">auto</span>
-          </button>
-          {grouped.map(({ cat, presets }) => (
-            <div key={cat} className="vp-group">
-              <div className="vp-group-head">{CATEGORY_TITLE[cat]}</div>
-              {presets.map((p) => (
-                <button
-                  key={p.key}
-                  className={`vp-item ${current === p.key ? "on" : ""}`}
-                  onClick={() => { onPick(p.key); setOpen(false); }}
-                >
-                  <span className="vp-item-icon">{CATEGORY_ICON[cat]}</span>
-                  <span className="vp-item-label">{p.label}</span>
-                  <span className="vp-item-dims">{p.w}×{p.h}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+// (ViewportPicker lives in App.tsx's Manager overlay — it needs to be visible
+//  over the native webviews, so it can't sit inside the pane chrome.)

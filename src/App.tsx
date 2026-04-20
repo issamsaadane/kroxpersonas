@@ -30,7 +30,7 @@ interface Project {
 }
 
 interface SavedPane {
-  instanceId: string;   // unique per pane — multiple panes per persona are allowed
+  instanceId: string;
   personaId: string;
   projectId: string;
   frame: FrameRect;
@@ -39,8 +39,7 @@ interface SavedPane {
 }
 
 interface UiState {
-  sidebarCollapsed: boolean;
-  railCollapsed: boolean;
+  activeProjectId?: string | null;
   openPanes: SavedPane[];
 }
 
@@ -75,8 +74,6 @@ const initials = (name: string) =>
 
 async function saveConfig(c: Config)                { await invoke("save_config", { config: c }); }
 async function loadConfig(): Promise<Config>        { return await invoke<Config>("load_config"); }
-// NOTE: Rust keys webviews by "personaId" — we pass instanceId there so clones
-// of the same persona get distinct webview labels.
 async function openPaneRust(instanceId: string, url: string, email: string, password: string, x: number, y: number, width: number, height: number) {
   await invoke("open_pane", { personaId: instanceId, url, email, password, x, y, width, height });
 }
@@ -85,28 +82,24 @@ async function setPaneBoundsRust(instanceId: string, x: number, y: number, width
 }
 async function closePaneRust(instanceId: string)    { await invoke("close_pane", { personaId: instanceId }); }
 async function closeAllPanesRust()                  { await invoke("close_all_panes"); }
+async function setPanesVisibleRust(visible: boolean){ await invoke("set_panes_visible", { visible }); }
 async function copyCreds(email: string, password: string) { await invoke("copy_creds", { email, password }); }
 
-/**
- * Given a local-to-workspace frame and a viewport preset, compute the
- * webview rect IN ABSOLUTE main-window coords. For non-fit presets, the
- * webview is centred inside the frame at preset dimensions.
- */
 function webviewRect(
   frame: FrameRect,
   viewport: Viewport,
   ws: { left: number; top: number },
 ): { x: number; y: number; width: number; height: number } {
-  // Leave 4px strips on right + bottom for the resize handles (they're HTML,
-  // the webview can't cover them — so the webview is inset by EDGE on those sides).
   const innerW = Math.max(1, frame.width  - EDGE);
   const innerH = Math.max(1, frame.height - TITLE_H - EDGE);
   let wvW = innerW;
   let wvH = innerH;
   if (viewport !== "fit") {
     const p = VIEWPORT_PRESETS[viewport];
-    wvW = Math.min(p.w, innerW);
-    wvH = Math.min(p.h, innerH);
+    if (p) {
+      wvW = Math.min(p.w, innerW);
+      wvH = Math.min(p.h, innerH);
+    }
   }
   const offX = Math.round((innerW - wvW) / 2);
   const offY = Math.round((innerH - wvH) / 2);
@@ -118,74 +111,44 @@ function webviewRect(
   };
 }
 
-// ─── Modal ───────────────────────────────────────────────────────────────────
-
-function Modal({
-  title,
-  children,
-  onClose,
-}: {
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{title}</h2>
-        {children}
-      </div>
-    </div>
-  );
+function framesIntersect(a: FrameRect, b: FrameRect): boolean {
+  return !(a.x + a.width  <= b.x ||
+           b.x + b.width  <= a.x ||
+           a.y + a.height <= b.y ||
+           b.y + b.height <= a.y);
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [config, setConfig]       = useState<Config>({ projects: [] });
-  const [activeId, setActiveId]   = useState<string | null>(null);
-  const [projModal, setProjModal] = useState<{ mode: "new" } | { mode: "edit"; p: Project } | null>(null);
-  const [userModal, setUserModal] = useState<{ mode: "new" } | { mode: "edit"; u: Persona } | null>(null);
-  const [toast, setToast]         = useState<string | null>(null);
-  const [ready, setReady]         = useState(false);
+  const [config, setConfig]     = useState<Config>({ projects: [] });
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [ready, setReady]       = useState(false);
+  const [toast, setToast]       = useState<string | null>(null);
 
-  const [panes, setPanes]                   = useState<OpenPane[]>([]);
-  const [zTop, setZTop]                     = useState(10);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [railCollapsed, setRailCollapsed]       = useState(false);
-  const [workspaceBounds, setWorkspaceBounds]   = useState({ width: 800, height: 600 });
-  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const [panes, setPanes]       = useState<OpenPane[]>([]);
+  const [zTop, setZTop]         = useState(10);
+  const [workspaceBounds, setWorkspaceBounds] = useState({ width: 800, height: 600 });
+  const workspaceRef            = useRef<HTMLDivElement | null>(null);
 
-  // Snapshots for use inside resize / restore handlers.
+  const [managerOpen, setManagerOpen] = useState(false);
+
   const panesRef = useRef<OpenPane[]>(panes);
   useEffect(() => { panesRef.current = panes; }, [panes]);
 
-  // ── boot ──────────────────────────────────────────────────────────────────
-
+  // Boot
   useEffect(() => {
     let cancelled = false;
     loadConfig().then((c) => {
       if (cancelled) return;
       setConfig(c);
-      if (c.projects.length) setActiveId(c.projects[0].id);
-      setSidebarCollapsed(c.ui?.sidebarCollapsed ?? false);
-      setRailCollapsed(c.ui?.railCollapsed ?? false);
+      setActiveId(c.ui?.activeProjectId ?? (c.projects[0]?.id ?? null));
 
       const saved = c.ui?.openPanes ?? [];
       if (saved.length) {
-        // Fill in a generated instanceId for legacy records that don't have one.
-        const filled = saved.map((s) => ({
-          ...s,
-          instanceId: s.instanceId ?? uid(),
-        }));
-        setPanes(filled.map((s) => ({ ...s })));
+        const filled = saved.map((s) => ({ ...s, instanceId: s.instanceId ?? uid() }));
+        setPanes(filled);
         setZTop(Math.max(10, ...filled.map((s) => s.zIndex)) + 1);
-        // Defer Rust-side opens until workspace has real bounds.
         requestAnimationFrame(() => requestAnimationFrame(async () => {
           const ws = workspaceRef.current?.getBoundingClientRect();
           if (!ws) return;
@@ -207,12 +170,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist on change (post-boot).
+  // Persist
   useEffect(() => {
     if (!ready) return;
     const ui: UiState = {
-      sidebarCollapsed,
-      railCollapsed,
+      activeProjectId: activeId,
       openPanes: panes.map((p) => ({
         instanceId: p.instanceId,
         personaId: p.personaId,
@@ -223,12 +185,9 @@ export default function App() {
       })),
     };
     saveConfig({ ...config, ui }).catch(console.error);
-  }, [config, panes, sidebarCollapsed, railCollapsed, ready]);
+  }, [config, panes, activeId, ready]);
 
-  // Workspace-size observer → keeps webviews aligned with HTML frames when the
-  // host window (or either sidebar) resizes. Also clamps pane frames to the
-  // new workspace size so panes never hang off the edge (which would cause
-  // a scrollbar, i.e. the "double scrolling" bug).
+  // Workspace resize observer
   useEffect(() => {
     const recalc = () => {
       const el = workspaceRef.current;
@@ -246,9 +205,7 @@ export default function App() {
         const y = Math.max(0, Math.min(p.frame.y, r.height - height));
         const frame = { x, y, width, height };
         if (frame.x !== p.frame.x || frame.y !== p.frame.y ||
-            frame.width !== p.frame.width || frame.height !== p.frame.height) {
-          needsUpdate = true;
-        }
+            frame.width !== p.frame.width || frame.height !== p.frame.height) needsUpdate = true;
         return { ...p, frame };
       });
       if (needsUpdate) setPanes(clamped);
@@ -266,6 +223,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Toggle native pane visibility when manager opens/closes.
+  useEffect(() => {
+    if (!ready) return;
+    setPanesVisibleRust(!managerOpen).catch(() => {});
+  }, [managerOpen, ready]);
+
   const activeProject = useMemo(
     () => config.projects.find((p) => p.id === activeId) ?? null,
     [config, activeId],
@@ -276,21 +239,13 @@ export default function App() {
     window.setTimeout(() => setToast(null), 1800);
   };
 
-  // ── Rect for a new pane: pick a free tile-slot so it doesn't overlap ──────
-
-  const framesIntersect = (a: FrameRect, b: FrameRect): boolean =>
-    !(a.x + a.width  <= b.x ||
-      b.x + b.width  <= a.x ||
-      a.y + a.height <= b.y ||
-      b.y + b.height <= a.y);
+  // ── Placement for new panes (avoids existing) ────────────────────────────
 
   const nextFrame = (): FrameRect => {
     const ws = workspaceRef.current?.getBoundingClientRect();
     const w = Math.max(400, ws?.width  ?? workspaceBounds.width);
     const h = Math.max(300, ws?.height ?? workspaceBounds.height);
     const existing = panes.map((p) => p.frame);
-
-    // 1) Try the tile slot for N+1 panes — probably free on open 2, 3, 4 …
     const tiles = tileLayout(panes.length + 1, w, h);
     for (const tile of tiles) {
       const cand: FrameRect = {
@@ -301,8 +256,6 @@ export default function App() {
       };
       if (!existing.some((e) => framesIntersect(cand, e))) return cand;
     }
-
-    // 2) Fall back to a cascade offset in the free area.
     for (let i = 0; i < 20; i++) {
       const cand: FrameRect = {
         x: 40 + i * 32,
@@ -313,13 +266,7 @@ export default function App() {
       if (cand.x + cand.width >= w || cand.y + cand.height >= h) break;
       if (!existing.some((e) => framesIntersect(cand, e))) return cand;
     }
-
-    // 3) No free spot; just place at origin. User can drag.
-    return {
-      x: 0, y: 0,
-      width:  Math.min(900, w),
-      height: Math.min(600, h),
-    };
+    return { x: 0, y: 0, width: Math.min(900, w), height: Math.min(600, h) };
   };
 
   // ── project CRUD ──────────────────────────────────────────────────────────
@@ -328,14 +275,9 @@ export default function App() {
     const p: Project = { id: uid(), name: name.trim(), serverUrl: serverUrl.trim(), personas: [] };
     setConfig((c) => ({ ...c, projects: [...c.projects, p] }));
     setActiveId(p.id);
-    setProjModal(null);
   };
   const updateProject = (id: string, patch: Partial<Project>) => {
-    setConfig((c) => ({
-      ...c,
-      projects: c.projects.map((p) => (p.id === id ? { ...p, ...patch } : p)),
-    }));
-    setProjModal(null);
+    setConfig((c) => ({ ...c, projects: c.projects.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
   };
   const deleteProject = (id: string) => {
     if (!confirm("Delete this project and all its personas? This cannot be undone.")) return;
@@ -359,7 +301,6 @@ export default function App() {
         p.id === activeProject.id ? { ...p, personas: [...p.personas, persona] } : p,
       ),
     }));
-    setUserModal(null);
   };
   const updatePersona = (id: string, patch: Partial<Persona>) => {
     if (!activeProject) return;
@@ -371,12 +312,10 @@ export default function App() {
           : p,
       ),
     }));
-    setUserModal(null);
   };
   const deletePersona = (id: string) => {
     if (!activeProject) return;
     if (!confirm("Delete this persona?")) return;
-    // Close every open clone of this persona.
     setPanes((prev) => {
       const drop = prev.filter((p) => p.personaId === id);
       drop.forEach((p) => closePaneRust(p.instanceId).catch(() => {}));
@@ -396,32 +335,22 @@ export default function App() {
     if (!activeProject) return;
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
-
-    // Always open a new clone — independent webview, independent size.
     const instanceId = uid();
     const frame = nextFrame();
     const newZ = zTop + 1;
     const rect = webviewRect(frame, "fit", { left: ws.left, top: ws.top });
-
     try {
-      await openPaneRust(
-        instanceId, activeProject.serverUrl, u.email, u.password,
-        rect.x, rect.y, rect.width, rect.height,
-      );
+      await openPaneRust(instanceId, activeProject.serverUrl, u.email, u.password,
+        rect.x, rect.y, rect.width, rect.height);
       setZTop(newZ);
       setPanes((prev) => [...prev, {
-        instanceId,
-        personaId: u.id,
-        projectId: activeProject.id,
-        frame,
-        viewport: "fit",
-        zIndex: newZ,
+        instanceId, personaId: u.id, projectId: activeProject.id,
+        frame, viewport: "fit", zIndex: newZ,
       }]);
       const existingCount = panes.filter((p) => p.personaId === u.id).length;
       pushToast(existingCount > 0 ? `Cloned ${u.name} (${existingCount + 1})` : `Launching ${u.name}…`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      pushToast(`Launch failed: ${msg}`);
+      pushToast(`Launch failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -431,11 +360,6 @@ export default function App() {
       drop.forEach((p) => closePaneRust(p.instanceId).catch(() => {}));
       return prev.filter((p) => p.personaId !== personaId);
     });
-  };
-
-  const handleCopy = async (u: Persona) => {
-    try { await copyCreds(u.email, u.password); pushToast(`Copied ${u.email} creds`); }
-    catch { pushToast("Copy failed"); }
   };
 
   const handlePaneMove = (instanceId: string, frame: FrameRect) => {
@@ -467,15 +391,16 @@ export default function App() {
       const next: OpenPane = { ...p, viewport };
       if (viewport !== "fit") {
         const preset = VIEWPORT_PRESETS[viewport];
-        next.frame = {
-          ...p.frame,
-          width:  preset.w + EDGE,
-          height: preset.h + TITLE_H + EDGE,
-        };
+        if (preset) {
+          next.frame = {
+            ...p.frame,
+            width:  preset.w + EDGE,
+            height: preset.h + TITLE_H + EDGE,
+          };
+        }
       }
       return next;
     }));
-
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
     setTimeout(() => {
@@ -486,22 +411,7 @@ export default function App() {
     }, 0);
   };
 
-  // ── grouping for active project ───────────────────────────────────────────
-
-  const grouped = useMemo(() => {
-    if (!activeProject) return [] as { label: string; users: Persona[] }[];
-    const bucket: Record<string, Persona[]> = {};
-    for (const u of activeProject.personas) {
-      const key = (u.label || "Uncategorised").trim();
-      (bucket[key] ??= []).push(u);
-    }
-    return Object.entries(bucket)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([label, users]) => ({ label, users }));
-  }, [activeProject]);
-
-  const openCount = (personaId: string) =>
-    panes.filter((p) => p.personaId === personaId).length;
+  // ── Derived ───────────────────────────────────────────────────────────────
 
   const paneInfo = (personaId: string) => {
     for (const proj of config.projects) {
@@ -510,30 +420,148 @@ export default function App() {
     }
     return null;
   };
+  const openCount = (personaId: string) => panes.filter((p) => p.personaId === personaId).length;
 
-  // ── render ────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${railCollapsed ? "rail-collapsed" : ""}`}>
-      {/* Sidebar */}
-      <aside className="sidebar">
-        <header>
+    <div className="app-slim">
+      {/* Top-left logo button — opens the manager popup */}
+      <button
+        className="logo-btn"
+        onClick={() => setManagerOpen(true)}
+        title="Open manager"
+      >
+        K
+      </button>
+
+      <section className="workspace" ref={workspaceRef}>
+        {panes.length === 0 && !managerOpen && (
+          <div className="workspace-empty">
+            Click the <strong>K</strong> logo to open the manager.
+          </div>
+        )}
+        {panes.map((p) => {
+          const info = paneInfo(p.personaId);
+          if (!info) return null;
+          const others = panes.filter((q) => q.instanceId !== p.instanceId).map((q) => q.frame);
+          const sameCount = panes.filter((q) => q.personaId === p.personaId).length;
+          const cloneIdx  = panes.filter((q) => q.personaId === p.personaId).findIndex((q) => q.instanceId === p.instanceId);
+          const suffix    = sameCount > 1 ? ` · #${cloneIdx + 1}` : "";
+          return (
+            <FramedPane
+              key={p.instanceId}
+              title={`${info.user.name}${suffix}`}
+              subtitle={p.viewport === "fit" ? info.user.label : viewportLabel(p.viewport)}
+              frame={p.frame}
+              zIndex={p.zIndex}
+              workspaceBounds={workspaceBounds}
+              otherFrames={others}
+              onMove={(frame) => handlePaneMove(p.instanceId, frame)}
+              onFocus={() => handlePaneFocus(p.instanceId)}
+              onClose={() => handlePaneClose(p.instanceId)}
+            />
+          );
+        })}
+      </section>
+
+      {managerOpen && (
+        <Manager
+          config={config}
+          activeId={activeId}
+          panes={panes}
+          setActiveId={setActiveId}
+          addProject={addProject}
+          updateProject={updateProject}
+          deleteProject={deleteProject}
+          addPersona={addPersona}
+          updatePersona={updatePersona}
+          deletePersona={deletePersona}
+          handleLaunch={handleLaunch}
+          handleCloseAll={handleCloseAll}
+          handlePaneClose={handlePaneClose}
+          handleSetViewport={handleSetViewport}
+          handleCopy={(u) => copyCreds(u.email, u.password).then(() => pushToast(`Copied ${u.email}`)).catch(() => pushToast("Copy failed"))}
+          openCount={openCount}
+          paneInfo={paneInfo}
+          onClose={() => setManagerOpen(false)}
+        />
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+// ─── Manager overlay ─────────────────────────────────────────────────────────
+
+function Manager(props: {
+  config: Config;
+  activeId: string | null;
+  panes: OpenPane[];
+  setActiveId: (id: string | null) => void;
+  addProject: (name: string, url: string) => void;
+  updateProject: (id: string, patch: Partial<Project>) => void;
+  deleteProject: (id: string) => void;
+  addPersona: (u: Omit<Persona, "id">) => void;
+  updatePersona: (id: string, patch: Partial<Persona>) => void;
+  deletePersona: (id: string) => void;
+  handleLaunch: (u: Persona) => void;
+  handleCloseAll: (personaId: string) => void;
+  handlePaneClose: (instanceId: string) => void;
+  handleSetViewport: (instanceId: string, v: Viewport) => void;
+  handleCopy: (u: Persona) => void;
+  openCount: (personaId: string) => number;
+  paneInfo: (personaId: string) => { user: Persona; project: Project } | null;
+  onClose: () => void;
+}) {
+  const {
+    config, activeId, panes, setActiveId,
+    addProject, updateProject, deleteProject,
+    addPersona, updatePersona, deletePersona,
+    handleLaunch, handleCloseAll, handlePaneClose, handleSetViewport, handleCopy,
+    openCount, paneInfo, onClose,
+  } = props;
+
+  const [projModal, setProjModal] = useState<{ mode: "new" } | { mode: "edit"; p: Project } | null>(null);
+  const [userModal, setUserModal] = useState<{ mode: "new" } | { mode: "edit"; u: Persona } | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const activeProject = config.projects.find((p) => p.id === activeId) ?? null;
+
+  const grouped = useMemo(() => {
+    if (!activeProject) return [] as { label: string; users: Persona[] }[];
+    const bucket: Record<string, Persona[]> = {};
+    for (const u of activeProject.personas) {
+      const key = (u.label || "Uncategorised").trim();
+      (bucket[key] ??= []).push(u);
+    }
+    return Object.entries(bucket).sort(([a], [b]) => a.localeCompare(b)).map(([label, users]) => ({ label, users }));
+  }, [activeProject]);
+
+  const openPanesForPersona = (personaId: string) =>
+    panes.filter((p) => p.personaId === personaId);
+
+  return (
+    <div className="manager-backdrop" onMouseDown={onClose}>
+      <div className="manager" onMouseDown={(e) => e.stopPropagation()}>
+        <header className="manager-head">
           <div className="logo">K</div>
-          {!sidebarCollapsed && <h1>KroxPersonas</h1>}
-          <button
-            className="collapse-btn"
-            onClick={() => setSidebarCollapsed((v) => !v)}
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {sidebarCollapsed ? "›" : "‹"}
-          </button>
+          <h1>KroxPersonas</h1>
+          <button className="btn" onClick={onClose} title="Close (Esc)">Close ✕</button>
         </header>
 
-        {!sidebarCollapsed && (
-          <>
+        <div className="manager-body">
+          <aside className="manager-sidebar">
+            <div className="sidebar-title">Projects</div>
             <div className="project-list">
               {config.projects.length === 0 && (
-                <div className="empty" style={{ padding: "20px 10px" }}>No projects yet.</div>
+                <div className="empty" style={{ padding: "16px 10px" }}>No projects yet.</div>
               )}
               {config.projects.map((p) => (
                 <button
@@ -551,173 +579,225 @@ export default function App() {
                 + New project
               </button>
             </footer>
-          </>
-        )}
-      </aside>
+          </aside>
 
-      {/* Main */}
-      <main className="main">
-        {!activeProject && (
-          <div className="workspace-empty">
-            {config.projects.length === 0
-              ? "Create a project to get started."
-              : "Select a project on the left."}
-          </div>
-        )}
-
-        {activeProject && (
-          <>
-            <header className="main-header">
-              <div>
-                <div className="title">{activeProject.name}</div>
-                <div className="url">{activeProject.serverUrl || "(no URL set)"}</div>
+          <main className="manager-main">
+            {!activeProject && (
+              <div className="workspace-empty" style={{ margin: "auto" }}>
+                {config.projects.length === 0
+                  ? "Create a project to get started."
+                  : "Select a project on the left."}
               </div>
-              <div className="actions">
-                <button
-                  className="btn"
-                  onClick={() => setRailCollapsed((v) => !v)}
-                  title={railCollapsed ? "Show persona rail" : "Hide persona rail"}
-                >
-                  {railCollapsed ? "Show personas" : "Hide personas"}
-                </button>
-                <button className="btn" onClick={() => setProjModal({ mode: "edit", p: activeProject })}>
-                  Edit project
-                </button>
-                <button className="btn danger-text" onClick={() => deleteProject(activeProject.id)}>
-                  Delete
-                </button>
-                <button className="btn primary" onClick={() => setUserModal({ mode: "new" })}>
-                  + Add persona
-                </button>
-              </div>
-            </header>
+            )}
 
-            <div className="main-body">
-              {!railCollapsed && (
-                <aside className="persona-rail">
+            {activeProject && (
+              <>
+                <header className="manager-main-head">
+                  <div>
+                    <div className="title">{activeProject.name}</div>
+                    <div className="url">{activeProject.serverUrl || "(no URL set)"}</div>
+                  </div>
+                  <div className="actions">
+                    <button className="btn" onClick={() => setProjModal({ mode: "edit", p: activeProject })}>
+                      Edit project
+                    </button>
+                    <button className="btn danger-text" onClick={() => deleteProject(activeProject.id)}>
+                      Delete
+                    </button>
+                    <button className="btn primary" onClick={() => setUserModal({ mode: "new" })}>
+                      + Add persona
+                    </button>
+                  </div>
+                </header>
+
+                <div className="manager-body-scroll">
                   {activeProject.personas.length === 0 && (
-                    <div className="empty">No personas yet.</div>
+                    <div className="empty">No personas yet. Add one to start launching.</div>
                   )}
+
                   {grouped.map(({ label, users }) => (
                     <section key={label} className="group">
                       <div className="group-head">
                         <div className="label">{label}</div>
                       </div>
-                      <div className="persona-list">
+
+                      <div className="manager-persona-list">
                         {users.map((u) => {
                           const count = openCount(u.id);
+                          const clones = openPanesForPersona(u.id);
                           return (
-                            <div className={`persona-row ${count > 0 ? "open" : ""}`} key={u.id}>
-                              <div className="avatar">
-                                {initials(u.name)}
-                                {count > 0 && <span className="clone-badge">{count}</span>}
-                              </div>
-                              <div className="who">
-                                <div className="name">{u.name}</div>
-                                <div className="email">{u.email}</div>
-                              </div>
-                              <div className="row-actions">
-                                <button
-                                  className="btn primary small"
-                                  onClick={() => handleLaunch(u)}
-                                  title={count > 0 ? "Open another clone" : "Open pane"}
-                                >
-                                  {count > 0 ? "+ Clone" : "Launch"}
-                                </button>
-                                {count > 0 && (
+                            <div className={`manager-persona ${count > 0 ? "open" : ""}`} key={u.id}>
+                              <div className="persona-head">
+                                <div className="avatar">
+                                  {initials(u.name)}
+                                  {count > 0 && <span className="clone-badge">{count}</span>}
+                                </div>
+                                <div className="who">
+                                  <div className="name">{u.name}</div>
+                                  <div className="email">{u.email}</div>
+                                </div>
+                                <div className="row-actions">
                                   <button
-                                    className="btn danger-text small"
-                                    onClick={() => handleCloseAll(u.id)}
-                                    title={`Close all ${count} open panes`}
+                                    className="btn primary small"
+                                    onClick={() => handleLaunch(u)}
+                                    title={count > 0 ? "Open another clone" : "Open pane"}
                                   >
-                                    ×{count}
+                                    {count > 0 ? "+ Clone" : "Launch"}
                                   </button>
-                                )}
-                                <button className="btn small" onClick={() => handleCopy(u)} title="Copy credentials">⧉</button>
-                                <button className="btn small" onClick={() => setUserModal({ mode: "edit", u })} title="Edit persona">…</button>
-                                <button className="btn danger-text small" onClick={() => deletePersona(u.id)} title="Delete persona">×</button>
+                                  {count > 0 && (
+                                    <button
+                                      className="btn danger-text small"
+                                      onClick={() => handleCloseAll(u.id)}
+                                      title={`Close all ${count} open panes`}
+                                    >
+                                      Close all
+                                    </button>
+                                  )}
+                                  <button className="btn small" onClick={() => handleCopy(u)} title="Copy credentials">⧉</button>
+                                  <button className="btn small" onClick={() => setUserModal({ mode: "edit", u })}>Edit</button>
+                                  <button className="btn danger-text small" onClick={() => deletePersona(u.id)}>Delete</button>
+                                </div>
                               </div>
+
+                              {clones.length > 0 && (
+                                <div className="clone-list">
+                                  {clones.map((p, i) => {
+                                    const info = paneInfo(p.personaId);
+                                    if (!info) return null;
+                                    return (
+                                      <div className="clone-row" key={p.instanceId}>
+                                        <div className="clone-tag">#{i + 1}</div>
+                                        <DevicePicker
+                                          current={p.viewport}
+                                          onPick={(v) => handleSetViewport(p.instanceId, v)}
+                                        />
+                                        <div className="clone-dims">
+                                          {Math.round(p.frame.width)} × {Math.round(p.frame.height)}
+                                        </div>
+                                        <button
+                                          className="btn danger-text small"
+                                          onClick={() => handlePaneClose(p.instanceId)}
+                                          title="Close this clone"
+                                        >
+                                          ✕
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </div>
                           );
                         })}
                       </div>
                     </section>
                   ))}
-                </aside>
-              )}
+                </div>
+              </>
+            )}
+          </main>
+        </div>
+      </div>
 
-              <section className="workspace" ref={workspaceRef}>
-                {panes.length === 0 && (
-                  <div className="workspace-empty">
-                    Click <strong>Launch</strong> on any persona to open it here.
-                  </div>
-                )}
-                {panes.map((p) => {
-                  const info = paneInfo(p.personaId);
-                  if (!info) return null;
-                  const others = panes
-                    .filter((q) => q.instanceId !== p.instanceId)
-                    .map((q) => q.frame);
-                  // Show a clone-number suffix when multiple panes share a persona.
-                  const sameCount = panes.filter((q) => q.personaId === p.personaId).length;
-                  const cloneIdx  = panes.filter((q) => q.personaId === p.personaId).findIndex((q) => q.instanceId === p.instanceId);
-                  const suffix    = sameCount > 1 ? ` · #${cloneIdx + 1}` : "";
-                  return (
-                    <FramedPane
-                      key={p.instanceId}
-                      title={`${info.user.name}${suffix}`}
-                      subtitle={p.viewport === "fit" ? info.user.label : viewportLabel(p.viewport)}
-                      frame={p.frame}
-                      zIndex={p.zIndex}
-                      viewport={p.viewport}
-                      workspaceBounds={workspaceBounds}
-                      otherFrames={others}
-                      onMove={(frame) => handlePaneMove(p.instanceId, frame)}
-                      onFocus={() => handlePaneFocus(p.instanceId)}
-                      onClose={() => handlePaneClose(p.instanceId)}
-                      onSetViewport={(v) => handleSetViewport(p.instanceId, v)}
-                    />
-                  );
-                })}
-              </section>
-            </div>
-          </>
-        )}
-      </main>
-
-      {/* Modals */}
       {projModal && (
         <ProjectForm
           initial={projModal.mode === "edit" ? projModal.p : undefined}
-          onSubmit={(name, url) =>
+          onSubmit={(name, url) => {
             projModal.mode === "edit"
               ? updateProject(projModal.p.id, { name, serverUrl: url })
-              : addProject(name, url)
-          }
+              : addProject(name, url);
+            setProjModal(null);
+          }}
           onClose={() => setProjModal(null)}
         />
       )}
       {userModal && activeProject && (
         <PersonaForm
           initial={userModal.mode === "edit" ? userModal.u : undefined}
-          onSubmit={(u) =>
-            userModal.mode === "edit" ? updatePersona(userModal.u.id, u) : addPersona(u)
-          }
+          onSubmit={(u) => {
+            userModal.mode === "edit" ? updatePersona(userModal.u.id, u) : addPersona(u);
+            setUserModal(null);
+          }}
           onClose={() => setUserModal(null)}
         />
       )}
-
-      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
 
-// ─── Project Form ────────────────────────────────────────────────────────────
+// ─── Device picker (in-manager, free to open downward without webview conflict) ──
+
+function DevicePicker({ current, onPick }: { current: Viewport; onPick: (v: Viewport) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const categories: Array<{ title: string; items: Array<{ key: Viewport; label: string; w?: number; h?: number }> }> = [
+    {
+      title: "Any",
+      items: [{ key: "fit", label: "Fit pane" }],
+    },
+    {
+      title: "Desktop",
+      items: Object.entries(VIEWPORT_PRESETS)
+        .filter(([, p]) => p.category === "desktop")
+        .map(([k, p]) => ({ key: k, label: p.label, w: p.w, h: p.h })),
+    },
+    {
+      title: "Tablet",
+      items: Object.entries(VIEWPORT_PRESETS)
+        .filter(([, p]) => p.category === "tablet")
+        .map(([k, p]) => ({ key: k, label: p.label, w: p.w, h: p.h })),
+    },
+    {
+      title: "Mobile",
+      items: Object.entries(VIEWPORT_PRESETS)
+        .filter(([, p]) => p.category === "mobile")
+        .map(([k, p]) => ({ key: k, label: p.label, w: p.w, h: p.h })),
+    },
+  ];
+
+  return (
+    <div className="pane-viewport" ref={ref} style={{ position: "relative" }}>
+      <button className="vp-trigger" onClick={() => setOpen((v) => !v)}>
+        <span className="vp-label">{viewportLabel(current)}</span>
+        <span className="vp-caret">▾</span>
+      </button>
+      {open && (
+        <div className="vp-menu">
+          {categories.map((cat) => (
+            <div key={cat.title} className="vp-group">
+              <div className="vp-group-head">{cat.title}</div>
+              {cat.items.map((p) => (
+                <button
+                  key={p.key}
+                  className={`vp-item ${current === p.key ? "on" : ""}`}
+                  onClick={() => { onPick(p.key); setOpen(false); }}
+                >
+                  <span className="vp-item-label">{p.label}</span>
+                  {p.w && p.h && <span className="vp-item-dims">{p.w}×{p.h}</span>}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Forms (small modals on top of the Manager) ──────────────────────────────
 
 function ProjectForm({
-  initial,
-  onSubmit,
-  onClose,
+  initial, onSubmit, onClose,
 }: {
   initial?: Project;
   onSubmit: (name: string, url: string) => void;
@@ -725,39 +805,36 @@ function ProjectForm({
 }) {
   const [name, setName] = useState(initial?.name ?? "");
   const [url, setUrl]   = useState(initial?.serverUrl ?? "http://localhost:3000");
-
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
     onSubmit(name, url);
   };
-
   return (
-    <Modal title={initial ? "Edit project" : "New project"} onClose={onClose}>
-      <form onSubmit={submit}>
-        <div className="field">
-          <label>Name</label>
-          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="KroxFlow staging" />
-        </div>
-        <div className="field">
-          <label>Server URL</label>
-          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:3000" />
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary">{initial ? "Save" : "Create"}</button>
-        </div>
-      </form>
-    </Modal>
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+        <h2>{initial ? "Edit project" : "New project"}</h2>
+        <form onSubmit={submit}>
+          <div className="field">
+            <label>Name</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="KroxFlow staging" />
+          </div>
+          <div className="field">
+            <label>Server URL</label>
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:3000" />
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn primary">{initial ? "Save" : "Create"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
-// ─── Persona Form ────────────────────────────────────────────────────────────
-
 function PersonaForm({
-  initial,
-  onSubmit,
-  onClose,
+  initial, onSubmit, onClose,
 }: {
   initial?: Persona;
   onSubmit: (u: Omit<Persona, "id">) => void;
@@ -767,38 +844,39 @@ function PersonaForm({
   const [email, setEmail]       = useState(initial?.email ?? "");
   const [password, setPassword] = useState(initial?.password ?? "");
   const [label, setLabel]       = useState(initial?.label ?? "admin");
-
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !email.trim()) return;
     onSubmit({ name: name.trim(), email: email.trim(), password, label: label.trim() || "Uncategorised" });
   };
-
   return (
-    <Modal title={initial ? "Edit persona" : "New persona"} onClose={onClose}>
-      <form onSubmit={submit}>
-        <div className="field">
-          <label>Display name</label>
-          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Sam Admin" />
-        </div>
-        <div className="field">
-          <label>Email</label>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="sam@example.com" />
-        </div>
-        <div className="field">
-          <label>Password</label>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
-          <p className="hint">Stored locally in plain JSON — use only for non-production test accounts.</p>
-        </div>
-        <div className="field">
-          <label>User type / label</label>
-          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="admin / editor / viewer" />
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary">{initial ? "Save" : "Create"}</button>
-        </div>
-      </form>
-    </Modal>
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+        <h2>{initial ? "Edit persona" : "New persona"}</h2>
+        <form onSubmit={submit}>
+          <div className="field">
+            <label>Display name</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Sam Admin" />
+          </div>
+          <div className="field">
+            <label>Email</label>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="sam@example.com" />
+          </div>
+          <div className="field">
+            <label>Password</label>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+            <p className="hint">Stored locally in plain JSON — use only for non-production test accounts.</p>
+          </div>
+          <div className="field">
+            <label>User type / label</label>
+            <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="admin / editor / viewer" />
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn primary">{initial ? "Save" : "Create"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }

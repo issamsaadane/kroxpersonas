@@ -276,6 +276,17 @@ fn close_all_panes(state: State<'_, PaneState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Show or hide every open persona webview. Used while the Manager overlay is
+/// visible so HTML controls aren't hidden underneath the native webviews.
+#[tauri::command]
+fn set_panes_visible(state: State<'_, PaneState>, visible: bool) -> Result<(), String> {
+    let map = state.webviews.lock().map_err(|e| format!("lock: {e}"))?;
+    for webview in map.values() {
+        let _ = if visible { webview.show() } else { webview.hide() };
+    }
+    Ok(())
+}
+
 // ─── Clipboard (manual fallback) ────────────────────────────────────────────
 
 #[tauri::command]
@@ -355,6 +366,7 @@ pub fn run() {
             set_pane_bounds,
             close_pane,
             close_all_panes,
+            set_panes_visible,
             copy_creds,
         ])
         .run(tauri::generate_context!())
