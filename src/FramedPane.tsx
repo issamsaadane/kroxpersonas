@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react";
 import { FrameRect } from "./layout";
 
-export const TITLE_H  = 36;
-export const BOTTOM_H = 16;
-export const MIN_W    = 320;
-export const MIN_H    = 220;
+export const TITLE_H = 36;
+export const EDGE    = 4;    // thin resize strip on right + bottom (replaces the old black bar)
+export const MIN_W   = 320;
+export const MIN_H   = 220;
 
 export type Viewport = "fit" | "desktop" | "tablet" | "mobile";
 
@@ -21,7 +21,6 @@ interface Props {
   zIndex: number;
   viewport: Viewport;
   workspaceBounds: { width: number; height: number };
-  /** Frames of every OTHER pane — used for snap + overlap prevention. */
   otherFrames: FrameRect[];
   onMove: (rect: FrameRect) => void;
   onFocus: () => void;
@@ -30,6 +29,7 @@ interface Props {
 }
 
 const SNAP = 8;
+type ResizeDir = "e" | "s" | "se";
 
 function intersects(a: FrameRect, b: FrameRect): boolean {
   return !(
@@ -40,14 +40,6 @@ function intersects(a: FrameRect, b: FrameRect): boolean {
   );
 }
 
-/**
- * Movable + resizable "window" frame. Title bar drags; bottom-right
- * corner resizes. Both via pointer events + rAF throttling so we don't
- * spam IPC on every pointermove.
- *
- * The native Tauri webview is rendered on top of the `.pane-slot` div
- * by the Rust side; this component never contains a real webview element.
- */
 export function FramedPane({
   title,
   subtitle,
@@ -63,6 +55,7 @@ export function FramedPane({
 }: Props) {
   const dragRef = useRef<null | {
     mode: "move" | "resize";
+    dir?: ResizeDir;
     startX: number;
     startY: number;
     startFrame: FrameRect;
@@ -77,64 +70,48 @@ export function FramedPane({
     height = Math.max(MIN_H, Math.min(height, wsH));
 
     if (mode === "resize") {
-      // Keep (x, y) fixed. Shrink the pane so it can't extend past the
-      // workspace edge or overlap another pane.
       width  = Math.min(width,  wsW - x);
       height = Math.min(height, wsH - y);
-
       for (const o of otherFrames) {
         const vAlign = !(y + height <= o.y || o.y + o.height <= y);
         const hAlign = !(x + width  <= o.x || o.x + o.width  <= x);
         if (vAlign && x < o.x && x + width  > o.x) width  = o.x - x;
         if (hAlign && y < o.y && y + height > o.y) height = o.y - y;
       }
-
-      // Snap right/bottom edge to workspace edge.
       if (Math.abs(x + width  - wsW) < SNAP) width  = wsW - x;
       if (Math.abs(y + height - wsH) < SNAP) height = wsH - y;
-      // Snap right/bottom edge to another pane's left/top.
       for (const o of otherFrames) {
         if (Math.abs((x + width)  - o.x) < SNAP) width  = o.x - x;
         if (Math.abs((y + height) - o.y) < SNAP) height = o.y - y;
       }
-
       width  = Math.max(MIN_W, width);
       height = Math.max(MIN_H, height);
       return { x, y, width, height };
     }
 
-    // Move mode — keep size, adjust position.
-    // First pass: workspace edge snaps.
+    // Move
     if (Math.abs(x) < SNAP) x = 0;
     if (Math.abs(y) < SNAP) y = 0;
     if (Math.abs(x + width  - wsW) < SNAP) x = wsW - width;
     if (Math.abs(y + height - wsH) < SNAP) y = wsH - height;
-
-    // Second pass: snap to each other pane's edges (touching + aligned).
     for (const o of otherFrames) {
-      // Edge-to-edge (touching): my left ↔ their right, my right ↔ their left, etc.
       if (Math.abs(x - (o.x + o.width)) < SNAP)   x = o.x + o.width;
       if (Math.abs((x + width)  - o.x) < SNAP)    x = o.x - width;
       if (Math.abs(y - (o.y + o.height)) < SNAP)  y = o.y + o.height;
       if (Math.abs((y + height) - o.y) < SNAP)    y = o.y - height;
-      // Edge-aligned: same left, same right, same top, same bottom.
       if (Math.abs(x - o.x) < SNAP) x = o.x;
       if (Math.abs((x + width)  - (o.x + o.width))  < SNAP) x = o.x + o.width  - width;
       if (Math.abs(y - o.y) < SNAP) y = o.y;
       if (Math.abs((y + height) - (o.y + o.height)) < SNAP) y = o.y + o.height - height;
     }
-
-    // Clamp to workspace so the pane can't leave the container.
     x = Math.max(0, Math.min(x, wsW - width));
     y = Math.max(0, Math.min(y, wsH - height));
-
-    // Push out of any remaining overlap along the nearest edge.
     for (const o of otherFrames) {
       if (!intersects({ x, y, width, height }, o)) continue;
-      const overlapLeft   = (x + width)  - o.x;       // push left by this
-      const overlapRight  = (o.x + o.width)  - x;     // push right
-      const overlapTop    = (y + height) - o.y;       // push up
-      const overlapBottom = (o.y + o.height) - y;     // push down
+      const overlapLeft   = (x + width)  - o.x;
+      const overlapRight  = (o.x + o.width)  - x;
+      const overlapTop    = (y + height) - o.y;
+      const overlapBottom = (o.y + o.height) - y;
       const min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
       if      (min === overlapLeft)   x = o.x - width;
       else if (min === overlapRight)  x = o.x + o.width;
@@ -143,13 +120,11 @@ export function FramedPane({
       x = Math.max(0, Math.min(x, wsW - width));
       y = Math.max(0, Math.min(y, wsH - height));
     }
-
     return { x, y, width, height };
   };
 
   const onTitleDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    // Don't start a drag from the viewport toggle / close button.
     const target = e.target as HTMLElement;
     if (target.closest(".pane-viewport, .pane-close")) return;
     e.preventDefault();
@@ -163,7 +138,7 @@ export function FramedPane({
     };
   };
 
-  const onResizeDown = (e: React.PointerEvent) => {
+  const onResizeDown = (dir: ResizeDir) => (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
@@ -171,6 +146,7 @@ export function FramedPane({
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     dragRef.current = {
       mode: "resize",
+      dir,
       startX: e.clientX,
       startY: e.clientY,
       startFrame: { ...frame },
@@ -181,14 +157,8 @@ export function FramedPane({
     let rafId = 0;
     let pending: FrameRect | null = null;
 
-    const flush = () => {
-      if (pending) { onMove(pending); pending = null; }
-      rafId = 0;
-    };
-    const schedule = (r: FrameRect) => {
-      pending = r;
-      if (!rafId) rafId = requestAnimationFrame(flush);
-    };
+    const flush = () => { if (pending) { onMove(pending); pending = null; } rafId = 0; };
+    const schedule = (r: FrameRect) => { pending = r; if (!rafId) rafId = requestAnimationFrame(flush); };
 
     const onMoveWin = (e: PointerEvent) => {
       const d = dragRef.current;
@@ -202,10 +172,11 @@ export function FramedPane({
           y: d.startFrame.y + dy,
         }, "move"));
       } else {
+        const dir = d.dir ?? "se";
         schedule(snapAndClamp({
           ...d.startFrame,
-          width:  d.startFrame.width  + dx,
-          height: d.startFrame.height + dy,
+          width:  d.startFrame.width  + (dir === "s" ? 0 : dx),
+          height: d.startFrame.height + (dir === "e" ? 0 : dy),
         }, "resize"));
       }
     };
@@ -276,12 +247,13 @@ export function FramedPane({
         </button>
       </div>
 
-      {/* Placeholder for the native webview — painted on top by Rust. */}
+      {/* Native webview paints over this. It does NOT reach the right / bottom
+          EDGE pixels — that thin strip is HTML, used for edge resize. */}
       <div className="pane-slot" />
 
-      <div className="pane-bottom">
-        <div className="pane-resize" onPointerDown={onResizeDown} title="Resize" />
-      </div>
+      <div className="pane-edge e"  onPointerDown={onResizeDown("e")}  />
+      <div className="pane-edge s"  onPointerDown={onResizeDown("s")}  />
+      <div className="pane-edge se" onPointerDown={onResizeDown("se")} />
     </div>
   );
 }

@@ -192,6 +192,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 
 .persona-row .avatar {
+  position: relative;
   width: 28px; height: 28px;
   border-radius: 999px;
   background: linear-gradient(135deg, #7c5cff, #41b3ff);
@@ -199,6 +200,19 @@ button { font: inherit; color: inherit; cursor: pointer; }
   display: grid; place-items: center;
   font-weight: 600; font-size: 11px;
   flex-shrink: 0;
+}
+.clone-badge {
+  position: absolute;
+  right: -4px; top: -4px;
+  min-width: 16px; height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-ink);
+  font-size: 10px;
+  font-weight: 700;
+  display: grid; place-items: center;
+  border: 2px solid var(--surface-2);
 }
 
 .persona-row .who { min-width: 0; }
@@ -317,23 +331,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
   min-height: 0;
 }
 
-.pane-bottom {
-  height: 16px;
-  background: var(--surface-2);
-  border-top: 1px solid var(--border);
-  position: relative;
-  flex-shrink: 0;
-}
-
-.pane-resize {
+/* Edge-resize strips — 4px thick, same colour as pane chrome so they look
+   like a border rather than a separate bar. */
+.pane-edge {
   position: absolute;
-  right: 0; bottom: 0;
-  width: 16px; height: 16px;
-  cursor: nwse-resize;
-  background:
-    linear-gradient(135deg, transparent 38%, rgba(255,255,255,0.22) 40%, rgba(255,255,255,0.22) 46%, transparent 48%,
-    transparent 58%, rgba(255,255,255,0.22) 60%, rgba(255,255,255,0.22) 66%, transparent 68%);
+  background: transparent;
   touch-action: none;
+  z-index: 2;
+}
+.pane-edge.e { right: 0; top: 36px; bottom: 0;  width: 4px; cursor: ew-resize; }
+.pane-edge.s { left:  0; right: 0;  bottom: 0;  height: 4px; cursor: ns-resize; }
+.pane-edge.se { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.pane-edge.se::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background:
+    linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.22) 42%, rgba(255,255,255,0.22) 48%, transparent 50%,
+    transparent 60%, rgba(255,255,255,0.22) 62%, rgba(255,255,255,0.22) 68%, transparent 70%);
 }
 
 /* ── Modal ─────────────────────────────────────────────────────────────── */

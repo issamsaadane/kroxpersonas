@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   FramedPane,
   TITLE_H,
-  BOTTOM_H,
+  EDGE,
   MIN_W,
   MIN_H,
   Viewport,
@@ -29,6 +29,7 @@ interface Project {
 }
 
 interface SavedPane {
+  instanceId: string;   // unique per pane — multiple panes per persona are allowed
   personaId: string;
   projectId: string;
   frame: FrameRect;
@@ -48,6 +49,7 @@ interface Config {
 }
 
 interface OpenPane {
+  instanceId: string;
   personaId: string;
   projectId: string;
   frame: FrameRect;
@@ -72,13 +74,15 @@ const initials = (name: string) =>
 
 async function saveConfig(c: Config)                { await invoke("save_config", { config: c }); }
 async function loadConfig(): Promise<Config>        { return await invoke<Config>("load_config"); }
-async function openPaneRust(personaId: string, url: string, email: string, password: string, x: number, y: number, width: number, height: number) {
-  await invoke("open_pane", { personaId, url, email, password, x, y, width, height });
+// NOTE: Rust keys webviews by "personaId" — we pass instanceId there so clones
+// of the same persona get distinct webview labels.
+async function openPaneRust(instanceId: string, url: string, email: string, password: string, x: number, y: number, width: number, height: number) {
+  await invoke("open_pane", { personaId: instanceId, url, email, password, x, y, width, height });
 }
-async function setPaneBoundsRust(personaId: string, x: number, y: number, width: number, height: number) {
-  await invoke("set_pane_bounds", { personaId, x, y, width, height });
+async function setPaneBoundsRust(instanceId: string, x: number, y: number, width: number, height: number) {
+  await invoke("set_pane_bounds", { personaId: instanceId, x, y, width, height });
 }
-async function closePaneRust(personaId: string)     { await invoke("close_pane", { personaId }); }
+async function closePaneRust(instanceId: string)    { await invoke("close_pane", { personaId: instanceId }); }
 async function closeAllPanesRust()                  { await invoke("close_all_panes"); }
 async function copyCreds(email: string, password: string) { await invoke("copy_creds", { email, password }); }
 
@@ -92,8 +96,10 @@ function webviewRect(
   viewport: Viewport,
   ws: { left: number; top: number },
 ): { x: number; y: number; width: number; height: number } {
-  const innerW = frame.width;
-  const innerH = Math.max(1, frame.height - TITLE_H - BOTTOM_H);
+  // Leave 4px strips on right + bottom for the resize handles (they're HTML,
+  // the webview can't cover them — so the webview is inset by EDGE on those sides).
+  const innerW = Math.max(1, frame.width  - EDGE);
+  const innerH = Math.max(1, frame.height - TITLE_H - EDGE);
   let wvW = innerW;
   let wvH = innerH;
   if (viewport !== "fit") {
@@ -171,20 +177,24 @@ export default function App() {
 
       const saved = c.ui?.openPanes ?? [];
       if (saved.length) {
-        // Push to state first — tiles render as HTML frames on next paint.
-        setPanes(saved.map((s) => ({ ...s })));
-        setZTop(Math.max(10, ...saved.map((s) => s.zIndex)) + 1);
+        // Fill in a generated instanceId for legacy records that don't have one.
+        const filled = saved.map((s) => ({
+          ...s,
+          instanceId: s.instanceId ?? uid(),
+        }));
+        setPanes(filled.map((s) => ({ ...s })));
+        setZTop(Math.max(10, ...filled.map((s) => s.zIndex)) + 1);
         // Defer Rust-side opens until workspace has real bounds.
         requestAnimationFrame(() => requestAnimationFrame(async () => {
           const ws = workspaceRef.current?.getBoundingClientRect();
           if (!ws) return;
-          for (const pane of saved) {
+          for (const pane of filled) {
             const proj = c.projects.find((p) => p.id === pane.projectId);
             const persona = proj?.personas.find((u) => u.id === pane.personaId);
             if (!proj || !persona) continue;
             const rect = webviewRect(pane.frame, pane.viewport, { left: ws.left, top: ws.top });
             await openPaneRust(
-              persona.id, proj.serverUrl, persona.email, persona.password,
+              pane.instanceId, proj.serverUrl, persona.email, persona.password,
               rect.x, rect.y, rect.width, rect.height,
             ).catch(() => {});
           }
@@ -203,6 +213,7 @@ export default function App() {
       sidebarCollapsed,
       railCollapsed,
       openPanes: panes.map((p) => ({
+        instanceId: p.instanceId,
         personaId: p.personaId,
         projectId: p.projectId,
         frame: p.frame,
@@ -243,7 +254,7 @@ export default function App() {
 
       for (const p of clamped) {
         const rect = webviewRect(p.frame, p.viewport, { left: r.left, top: r.top });
-        setPaneBoundsRust(p.personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
+        setPaneBoundsRust(p.instanceId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
       }
     };
     recalc();
@@ -329,7 +340,7 @@ export default function App() {
     if (!confirm("Delete this project and all its personas? This cannot be undone.")) return;
     setPanes((prev) => {
       const drop = prev.filter((p) => p.projectId === id);
-      drop.forEach((p) => closePaneRust(p.personaId).catch(() => {}));
+      drop.forEach((p) => closePaneRust(p.instanceId).catch(() => {}));
       return prev.filter((p) => p.projectId !== id);
     });
     setConfig((c) => ({ ...c, projects: c.projects.filter((p) => p.id !== id) }));
@@ -364,8 +375,12 @@ export default function App() {
   const deletePersona = (id: string) => {
     if (!activeProject) return;
     if (!confirm("Delete this persona?")) return;
-    closePaneRust(id).catch(() => {});
-    setPanes((prev) => prev.filter((p) => p.personaId !== id));
+    // Close every open clone of this persona.
+    setPanes((prev) => {
+      const drop = prev.filter((p) => p.personaId === id);
+      drop.forEach((p) => closePaneRust(p.instanceId).catch(() => {}));
+      return prev.filter((p) => p.personaId !== id);
+    });
     setConfig((c) => ({
       ...c,
       projects: c.projects.map((p) =>
@@ -378,41 +393,43 @@ export default function App() {
 
   const handleLaunch = async (u: Persona) => {
     if (!activeProject) return;
-    if (panes.some((p) => p.personaId === u.id)) {
-      // Already open — just bring to front.
-      setZTop((z) => {
-        const next = z + 1;
-        setPanes((prev) => prev.map((p) => p.personaId === u.id ? { ...p, zIndex: next } : p));
-        return next;
-      });
-      pushToast(`${u.name} is already open`);
-      return;
-    }
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
 
+    // Always open a new clone — independent webview, independent size.
+    const instanceId = uid();
     const frame = nextFrame();
     const newZ = zTop + 1;
     const rect = webviewRect(frame, "fit", { left: ws.left, top: ws.top });
 
     try {
       await openPaneRust(
-        u.id, activeProject.serverUrl, u.email, u.password,
+        instanceId, activeProject.serverUrl, u.email, u.password,
         rect.x, rect.y, rect.width, rect.height,
       );
       setZTop(newZ);
       setPanes((prev) => [...prev, {
+        instanceId,
         personaId: u.id,
         projectId: activeProject.id,
         frame,
         viewport: "fit",
         zIndex: newZ,
       }]);
-      pushToast(`Launching ${u.name}…`);
+      const existingCount = panes.filter((p) => p.personaId === u.id).length;
+      pushToast(existingCount > 0 ? `Cloned ${u.name} (${existingCount + 1})` : `Launching ${u.name}…`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       pushToast(`Launch failed: ${msg}`);
     }
+  };
+
+  const handleCloseAll = (personaId: string) => {
+    setPanes((prev) => {
+      const drop = prev.filter((p) => p.personaId === personaId);
+      drop.forEach((p) => closePaneRust(p.instanceId).catch(() => {}));
+      return prev.filter((p) => p.personaId !== personaId);
+    });
   };
 
   const handleCopy = async (u: Persona) => {
@@ -420,56 +437,51 @@ export default function App() {
     catch { pushToast("Copy failed"); }
   };
 
-  const handlePaneMove = (personaId: string, frame: FrameRect) => {
-    setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, frame } : p)));
+  const handlePaneMove = (instanceId: string, frame: FrameRect) => {
+    setPanes((prev) => prev.map((p) => (p.instanceId === instanceId ? { ...p, frame } : p)));
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
-    const p = panesRef.current.find((x) => x.personaId === personaId);
+    const p = panesRef.current.find((x) => x.instanceId === instanceId);
     const vp = p?.viewport ?? "fit";
     const rect = webviewRect(frame, vp, { left: ws.left, top: ws.top });
-    setPaneBoundsRust(personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
+    setPaneBoundsRust(instanceId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
   };
 
-  const handlePaneFocus = (personaId: string) => {
+  const handlePaneFocus = (instanceId: string) => {
     setZTop((z) => {
       const next = z + 1;
-      setPanes((prev) => prev.map((p) => (p.personaId === personaId ? { ...p, zIndex: next } : p)));
+      setPanes((prev) => prev.map((p) => (p.instanceId === instanceId ? { ...p, zIndex: next } : p)));
       return next;
     });
   };
 
-  const handlePaneClose = (personaId: string) => {
-    closePaneRust(personaId).catch(() => {});
-    setPanes((prev) => prev.filter((p) => p.personaId !== personaId));
+  const handlePaneClose = (instanceId: string) => {
+    closePaneRust(instanceId).catch(() => {});
+    setPanes((prev) => prev.filter((p) => p.instanceId !== instanceId));
   };
 
-  const handleSetViewport = (personaId: string, viewport: Viewport) => {
+  const handleSetViewport = (instanceId: string, viewport: Viewport) => {
     setPanes((prev) => prev.map((p) => {
-      if (p.personaId !== personaId) return p;
+      if (p.instanceId !== instanceId) return p;
       const next: OpenPane = { ...p, viewport };
-      // For non-fit presets, resize the pane to match the preset so the whole
-      // frame (including chrome) matches the device size. Fit keeps whatever
-      // size the user has dragged it to.
       if (viewport !== "fit") {
         const preset = VIEWPORT_PRESETS[viewport];
         next.frame = {
           ...p.frame,
-          width:  preset.w,
-          height: preset.h + TITLE_H + BOTTOM_H,
+          width:  preset.w + EDGE,
+          height: preset.h + TITLE_H + EDGE,
         };
       }
       return next;
     }));
 
-    // Push the new webview rect right away — the effect below also re-syncs,
-    // but this keeps the user's click snappy.
     const ws = workspaceRef.current?.getBoundingClientRect();
     if (!ws) return;
     setTimeout(() => {
-      const p = panesRef.current.find((x) => x.personaId === personaId);
+      const p = panesRef.current.find((x) => x.instanceId === instanceId);
       if (!p) return;
       const rect = webviewRect(p.frame, p.viewport, { left: ws.left, top: ws.top });
-      setPaneBoundsRust(personaId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
+      setPaneBoundsRust(instanceId, rect.x, rect.y, rect.width, rect.height).catch(() => {});
     }, 0);
   };
 
@@ -487,7 +499,8 @@ export default function App() {
       .map(([label, users]) => ({ label, users }));
   }, [activeProject]);
 
-  const isOpen = (id: string) => panes.some((p) => p.personaId === id);
+  const openCount = (personaId: string) =>
+    panes.filter((p) => p.personaId === personaId).length;
 
   const paneInfo = (personaId: string) => {
     for (const proj of config.projects) {
@@ -591,19 +604,33 @@ export default function App() {
                       </div>
                       <div className="persona-list">
                         {users.map((u) => {
-                          const open = isOpen(u.id);
+                          const count = openCount(u.id);
                           return (
-                            <div className={`persona-row ${open ? "open" : ""}`} key={u.id}>
-                              <div className="avatar">{initials(u.name)}</div>
+                            <div className={`persona-row ${count > 0 ? "open" : ""}`} key={u.id}>
+                              <div className="avatar">
+                                {initials(u.name)}
+                                {count > 0 && <span className="clone-badge">{count}</span>}
+                              </div>
                               <div className="who">
                                 <div className="name">{u.name}</div>
                                 <div className="email">{u.email}</div>
                               </div>
                               <div className="row-actions">
-                                {open ? (
-                                  <button className="btn danger-text small" onClick={() => handlePaneClose(u.id)}>Close</button>
-                                ) : (
-                                  <button className="btn primary small" onClick={() => handleLaunch(u)}>Launch</button>
+                                <button
+                                  className="btn primary small"
+                                  onClick={() => handleLaunch(u)}
+                                  title={count > 0 ? "Open another clone" : "Open pane"}
+                                >
+                                  {count > 0 ? "+ Clone" : "Launch"}
+                                </button>
+                                {count > 0 && (
+                                  <button
+                                    className="btn danger-text small"
+                                    onClick={() => handleCloseAll(u.id)}
+                                    title={`Close all ${count} open panes`}
+                                  >
+                                    ×{count}
+                                  </button>
                                 )}
                                 <button className="btn small" onClick={() => handleCopy(u)} title="Copy credentials">⧉</button>
                                 <button className="btn small" onClick={() => setUserModal({ mode: "edit", u })} title="Edit persona">…</button>
@@ -628,22 +655,26 @@ export default function App() {
                   const info = paneInfo(p.personaId);
                   if (!info) return null;
                   const others = panes
-                    .filter((q) => q.personaId !== p.personaId)
+                    .filter((q) => q.instanceId !== p.instanceId)
                     .map((q) => q.frame);
+                  // Show a clone-number suffix when multiple panes share a persona.
+                  const sameCount = panes.filter((q) => q.personaId === p.personaId).length;
+                  const cloneIdx  = panes.filter((q) => q.personaId === p.personaId).findIndex((q) => q.instanceId === p.instanceId);
+                  const suffix    = sameCount > 1 ? ` · #${cloneIdx + 1}` : "";
                   return (
                     <FramedPane
-                      key={p.personaId}
-                      title={info.user.name}
+                      key={p.instanceId}
+                      title={`${info.user.name}${suffix}`}
                       subtitle={p.viewport === "fit" ? info.user.label : p.viewport}
                       frame={p.frame}
                       zIndex={p.zIndex}
                       viewport={p.viewport}
                       workspaceBounds={workspaceBounds}
                       otherFrames={others}
-                      onMove={(frame) => handlePaneMove(p.personaId, frame)}
-                      onFocus={() => handlePaneFocus(p.personaId)}
-                      onClose={() => handlePaneClose(p.personaId)}
-                      onSetViewport={(v) => handleSetViewport(p.personaId, v)}
+                      onMove={(frame) => handlePaneMove(p.instanceId, frame)}
+                      onFocus={() => handlePaneFocus(p.instanceId)}
+                      onClose={() => handlePaneClose(p.instanceId)}
+                      onSetViewport={(v) => handleSetViewport(p.instanceId, v)}
                     />
                   );
                 })}
