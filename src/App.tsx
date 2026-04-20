@@ -8,6 +8,7 @@ import {
   MIN_H,
   Viewport,
   VIEWPORT_PRESETS,
+  viewportLabel,
 } from "./FramedPane";
 import { FrameRect, tileLayout } from "./layout";
 
@@ -665,7 +666,7 @@ export default function App() {
                     <FramedPane
                       key={p.instanceId}
                       title={`${info.user.name}${suffix}`}
-                      subtitle={p.viewport === "fit" ? info.user.label : p.viewport}
+                      subtitle={p.viewport === "fit" ? info.user.label : viewportLabel(p.viewport)}
                       frame={p.frame}
                       zIndex={p.zIndex}
                       viewport={p.viewport}

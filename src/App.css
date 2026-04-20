@@ -277,29 +277,72 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .pane-viewport {
   margin-left: auto;
-  display: inline-flex;
-  gap: 2px;
-  background: rgba(255,255,255,0.04);
-  border-radius: 6px;
-  padding: 2px;
+  position: relative;
 }
-.vp-btn {
+
+.vp-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+  max-width: 240px;
+}
+.vp-trigger:hover { background: rgba(255,255,255,0.08); }
+.vp-icon  { font-size: 12px; }
+.vp-label { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vp-dims  { color: var(--text-dim); font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.vp-caret { color: var(--text-dim); font-size: 10px; }
+
+.vp-menu {
+  position: absolute;
+  right: 0; top: calc(100% + 4px);
+  z-index: 10;
+  min-width: 240px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  max-height: 420px;
+  overflow-y: auto;
+}
+.vp-group { margin-top: 4px; }
+.vp-group:first-of-type { margin-top: 6px; }
+.vp-group-head {
+  padding: 6px 10px 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.vp-item {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
   border: none;
   background: transparent;
-  color: var(--text-dim);
-  padding: 3px 7px;
-  border-radius: 4px;
-  font-size: 11px;
-  display: inline-flex; align-items: center; gap: 4px;
-  line-height: 1;
+  color: var(--text);
+  border-radius: 6px;
+  font-size: 12px;
+  text-align: left;
 }
-.vp-btn:hover { color: var(--text); }
-.vp-btn.on {
+.vp-item:hover { background: rgba(255,255,255,0.06); }
+.vp-item.on {
   background: var(--primary);
   color: var(--primary-ink);
-  font-weight: 600;
 }
-.vp-label { font-size: 10.5px; }
+.vp-item.on .vp-item-dims { color: rgba(255,255,255,0.75); }
+.vp-item-icon  { font-size: 13px; }
+.vp-item-label { font-weight: 500; }
+.vp-item-dims  { color: var(--text-dim); font-size: 10.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .pane-title-name {
   font-size: 12px; font-weight: 600;
   white-space: nowrap; text-overflow: ellipsis; overflow: hidden;

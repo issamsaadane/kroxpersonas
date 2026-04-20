@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FrameRect } from "./layout";
 
 export const TITLE_H = 36;
@@ -6,12 +6,46 @@ export const EDGE    = 4;    // thin resize strip on right + bottom (replaces th
 export const MIN_W   = 320;
 export const MIN_H   = 220;
 
-export type Viewport = "fit" | "desktop" | "tablet" | "mobile";
+export type Viewport = string;  // "fit" | any key in VIEWPORT_PRESETS
 
-export const VIEWPORT_PRESETS: Record<Exclude<Viewport, "fit">, { w: number; h: number; label: string }> = {
-  desktop: { w: 1280, h: 800,  label: "Desktop" },
-  tablet:  { w: 768,  h: 1024, label: "Tablet"  },
-  mobile:  { w: 375,  h: 812,  label: "Mobile"  },
+type Category = "desktop" | "tablet" | "mobile";
+
+interface PresetDef { w: number; h: number; label: string; category: Category }
+
+export const VIEWPORT_PRESETS: Record<string, PresetDef> = {
+  // Desktop
+  "desktop-fhd":  { w: 1920, h: 1080, label: "1080p FHD",    category: "desktop" },
+  "desktop":      { w: 1440, h: 900,  label: "Desktop",      category: "desktop" },
+  "desktop-sm":   { w: 1280, h: 800,  label: "Desktop small",category: "desktop" },
+
+  // Tablet
+  "ipad-pro":     { w: 1024, h: 1366, label: "iPad Pro 11\"", category: "tablet" },
+  "ipad":         { w: 820,  h: 1180, label: "iPad",          category: "tablet" },
+  "ipad-mini":    { w: 768,  h: 1024, label: "iPad mini",     category: "tablet" },
+
+  // Mobile
+  "iphone-max":   { w: 430,  h: 932,  label: "iPhone 15 Pro Max", category: "mobile" },
+  "iphone":       { w: 393,  h: 852,  label: "iPhone 15 Pro",     category: "mobile" },
+  "iphone-mini":  { w: 375,  h: 812,  label: "iPhone SE / mini",  category: "mobile" },
+  "galaxy":       { w: 384,  h: 854,  label: "Galaxy S24",        category: "mobile" },
+  "pixel":        { w: 412,  h: 915,  label: "Pixel 8",           category: "mobile" },
+};
+
+export function viewportLabel(v: Viewport): string {
+  if (v === "fit") return "Fit";
+  return VIEWPORT_PRESETS[v]?.label ?? v;
+}
+
+const CATEGORY_ORDER: Category[] = ["desktop", "tablet", "mobile"];
+const CATEGORY_TITLE: Record<Category, string> = {
+  desktop: "Desktop",
+  tablet: "Tablet",
+  mobile: "Mobile",
+};
+const CATEGORY_ICON: Record<Category, string> = {
+  desktop: "🖥",
+  tablet: "📱",
+  mobile: "📱",
 };
 
 interface Props {
@@ -214,28 +248,7 @@ export function FramedPane({
         <span className="pane-title-name">{title}</span>
         {subtitle && <span className="pane-title-sub">{subtitle}</span>}
 
-        <div className="pane-viewport" title="Viewport">
-          {(["fit", "desktop", "tablet", "mobile"] as Viewport[]).map((v) => (
-            <button
-              key={v}
-              className={`vp-btn ${viewport === v ? "on" : ""}`}
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); onSetViewport(v); }}
-              title={v === "fit" ? "Fit pane" : VIEWPORT_PRESETS[v].label}
-            >
-              {v === "fit"
-                ? "⤢"
-                : v === "desktop"
-                  ? "🖥"
-                  : v === "tablet"
-                    ? "📱"
-                    : "📱"}
-              <span className="vp-label">
-                {v === "fit" ? "Fit" : VIEWPORT_PRESETS[v].label}
-              </span>
-            </button>
-          ))}
-        </div>
+        <ViewportPicker current={viewport} onPick={onSetViewport} />
 
         <button
           className="pane-close"
@@ -254,6 +267,86 @@ export function FramedPane({
       <div className="pane-edge e"  onPointerDown={onResizeDown("e")}  />
       <div className="pane-edge s"  onPointerDown={onResizeDown("s")}  />
       <div className="pane-edge se" onPointerDown={onResizeDown("se")} />
+    </div>
+  );
+}
+
+// ─── Viewport picker dropdown ──────────────────────────────────────────────
+
+function ViewportPicker({
+  current,
+  onPick,
+}: {
+  current: Viewport;
+  onPick: (v: Viewport) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const grouped = CATEGORY_ORDER.map((cat) => ({
+    cat,
+    presets: Object.entries(VIEWPORT_PRESETS)
+      .filter(([, p]) => p.category === cat)
+      .map(([key, p]) => ({ key, ...p })),
+  }));
+
+  const currentDef = current === "fit" ? null : VIEWPORT_PRESETS[current];
+
+  return (
+    <div className="pane-viewport" ref={ref}>
+      <button
+        className="vp-trigger"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        title={viewportLabel(current)}
+      >
+        <span className="vp-icon">
+          {current === "fit" ? "⤢" : CATEGORY_ICON[currentDef!.category]}
+        </span>
+        <span className="vp-label">{viewportLabel(current)}</span>
+        {currentDef && (
+          <span className="vp-dims">{currentDef.w}×{currentDef.h}</span>
+        )}
+        <span className="vp-caret">▾</span>
+      </button>
+
+      {open && (
+        <div className="vp-menu" onPointerDown={(e) => e.stopPropagation()}>
+          <button
+            className={`vp-item ${current === "fit" ? "on" : ""}`}
+            onClick={() => { onPick("fit"); setOpen(false); }}
+          >
+            <span className="vp-item-icon">⤢</span>
+            <span className="vp-item-label">Fit pane</span>
+            <span className="vp-item-dims">auto</span>
+          </button>
+          {grouped.map(({ cat, presets }) => (
+            <div key={cat} className="vp-group">
+              <div className="vp-group-head">{CATEGORY_TITLE[cat]}</div>
+              {presets.map((p) => (
+                <button
+                  key={p.key}
+                  className={`vp-item ${current === p.key ? "on" : ""}`}
+                  onClick={() => { onPick(p.key); setOpen(false); }}
+                >
+                  <span className="vp-item-icon">{CATEGORY_ICON[cat]}</span>
+                  <span className="vp-item-label">{p.label}</span>
+                  <span className="vp-item-dims">{p.w}×{p.h}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
