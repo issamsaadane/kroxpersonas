@@ -648,3 +648,40 @@ button { font: inherit; color: inherit; cursor: pointer; }
   animation: fc-spin 0.8s linear infinite;
 }
 @keyframes fc-spin { to { transform: rotate(360deg); } }
+
+.fc-permission-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  display: grid; place-items: center;
+  z-index: 10000;
+}
+.fc-permission {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px 24px 20px;
+  width: min(460px, 92vw);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+}
+.fc-permission h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.fc-permission p, .fc-permission ol {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin: 0 0 12px;
+}
+.fc-permission ol {
+  padding-left: 20px;
+}
+.fc-permission ol li { margin-bottom: 4px; }
+.fc-permission strong { color: var(--text); font-weight: 600; }
+.fc-permission-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 8px;
+}

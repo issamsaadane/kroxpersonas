@@ -290,10 +290,14 @@ fn set_panes_visible(state: State<'_, PaneState>, visible: bool) -> Result<(), S
 // ─── Screen capture (for the ff feedback shortcut) ─────────────────────────
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScreenCapture {
     data_url: String,
     width: u32,
     height: u32,
+    /// True when the captured image is entirely opaque black — on macOS this
+    /// almost always means Screen Recording permission has not been granted.
+    looks_blank: bool,
 }
 
 /// Capture the primary display and return a base64-encoded PNG data URL.
@@ -313,6 +317,24 @@ fn capture_primary_screen() -> Result<ScreenCapture, String> {
     let width = img.width();
     let height = img.height();
 
+    // Sample a handful of pixels across the image to detect the all-black case
+    // (macOS returns an entirely black image when Screen Recording permission
+    // is missing — we want to surface that cleanly, not silently).
+    let looks_blank = {
+        let raw = img.as_raw();
+        let stride = 4usize;                      // RGBA
+        let sample_count = 64usize.min((width * height) as usize);
+        let step = ((width * height) as usize / sample_count.max(1)).max(1);
+        let mut max_channel = 0u8;
+        for i in 0..sample_count {
+            let base = i * step * stride;
+            if base + 2 >= raw.len() { break; }
+            max_channel = max_channel.max(raw[base]).max(raw[base + 1]).max(raw[base + 2]);
+            if max_channel > 8 { break; }
+        }
+        max_channel <= 8
+    };
+
     // Encode to PNG in memory.
     let mut png = Vec::with_capacity((width * height * 3) as usize);
     {
@@ -323,7 +345,23 @@ fn capture_primary_screen() -> Result<ScreenCapture, String> {
     }
 
     let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&png));
-    Ok(ScreenCapture { data_url, width, height })
+    Ok(ScreenCapture { data_url, width, height, looks_blank })
+}
+
+/// Open the macOS Privacy → Screen Recording settings pane so the user can
+/// grant permission to KroxPersonas. No-op on other platforms (returns an err).
+#[tauri::command]
+fn open_screen_recording_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .spawn()
+            .map_err(|e| format!("open settings: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    { Err("Only supported on macOS".into()) }
 }
 
 // ─── Clipboard (manual fallback) ────────────────────────────────────────────
@@ -407,6 +445,7 @@ pub fn run() {
             close_all_panes,
             set_panes_visible,
             capture_primary_screen,
+            open_screen_recording_settings,
             copy_creds,
         ])
         .run(tauri::generate_context!())

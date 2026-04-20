@@ -25,21 +25,21 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return false;
 }
 
-// Capture via Tauri-side Rust command (xcap crate) — more reliable than
-// getDisplayMedia inside a WKWebView, and no browser permission prompt each time.
-// (The OS still prompts once for Screen Recording permission on macOS the
-// first time the app tries to capture — that prompt is at the system level.)
-async function captureScreen(): Promise<{ dataUrl: string; w: number; h: number } | null> {
-  const res = await invoke<{ dataUrl: string; width: number; height: number }>(
-    "capture_primary_screen",
-  );
-  return { dataUrl: res.dataUrl, w: res.width, h: res.height };
+interface CaptureResult { dataUrl: string; width: number; height: number; looksBlank: boolean }
+
+// Capture via Tauri-side Rust command (xcap crate). No browser permission
+// prompt; macOS still requires a one-time Screen Recording permission — if
+// that's missing, the capture silently returns an all-black image, which
+// we detect server-side as `looksBlank`.
+async function captureScreen(): Promise<CaptureResult> {
+  return await invoke<CaptureResult>("capture_primary_screen");
 }
 
 export function FeedbackCapture() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [annotateState, setAnnotateState] = useState<AnnotateState | null>(null);
   const [copiedToast, setCopiedToast] = useState<"copied" | "failed" | null>(null);
+  const [needsPermission, setNeedsPermission] = useState(false);
   const lastFRef = useRef<number>(0);
 
   // Hide persona webviews whenever the annotate overlay is up; they'd cover
@@ -55,7 +55,14 @@ export function FeedbackCapture() {
       setIsCapturing(true);
       captureScreen()
         .then((r) => {
-          if (r) setAnnotateState({ dataUrl: r.dataUrl, w: r.w, h: r.h });
+          if (!r) return;
+          if (r.looksBlank) {
+            // macOS without Screen Recording permission returns an all-black
+            // frame — surface the fix-it flow instead of an unusable overlay.
+            setNeedsPermission(true);
+            return;
+          }
+          setAnnotateState({ dataUrl: r.dataUrl, w: r.width, h: r.height });
         })
         .catch(() => setCopiedToast("failed"))
         .finally(() => setIsCapturing(false));
@@ -116,6 +123,41 @@ export function FeedbackCapture() {
           onDone={handleAnnotateDone}
           onCancel={() => setAnnotateState(null)}
         />
+      )}
+
+      {needsPermission && (
+        <div className="fc-permission-backdrop" onClick={() => setNeedsPermission(false)}>
+          <div className="fc-permission" onClick={(e) => e.stopPropagation()}>
+            <h2>Screen Recording permission needed</h2>
+            <p>
+              macOS returned a blank screenshot. KroxPersonas needs
+              <strong> Screen Recording </strong>
+              permission to capture the screen for the feedback tool.
+            </p>
+            <ol>
+              <li>Open <strong>System Settings → Privacy &amp; Security → Screen Recording</strong>.</li>
+              <li>Enable <strong>KroxPersonas</strong> in the list.</li>
+              <li>Quit and re-launch KroxPersonas.</li>
+            </ol>
+            <div className="fc-permission-actions">
+              <button
+                className="btn"
+                onClick={() => setNeedsPermission(false)}
+              >
+                Not now
+              </button>
+              <button
+                className="btn primary"
+                onClick={() => {
+                  invoke("open_screen_recording_settings").catch(() => {});
+                  setNeedsPermission(false);
+                }}
+              >
+                Open Settings
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

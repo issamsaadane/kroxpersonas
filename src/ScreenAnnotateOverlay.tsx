@@ -472,11 +472,11 @@ export function ScreenAnnotateOverlay({ imageDataUrl, imgWidth, imgHeight, onDon
         {/* Done */}
         <button
           onClick={handleDone}
-          title="Add to feedback"
+          title="Copy annotated screenshot to clipboard"
           className="flex h-8 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
         >
           <Check className="h-3.5 w-3.5" />
-          Add to feedback
+          Copy to clipboard
         </button>
       </div>
 
