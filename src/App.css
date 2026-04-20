@@ -146,6 +146,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
   grid-template-columns: 260px 1fr;
   min-height: 0;
   min-width: 0;
+  transition: grid-template-columns 180ms ease;
+}
+.app.rail-collapsed .main-body {
+  grid-template-columns: 1fr;
 }
 
 /* ── Persona rail ─────────────────────────────────────────────────────── */
@@ -312,7 +316,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
   min-height: 0;
 }
 
-/* (No bottom strip / resize grip in tile mode — the grid owns the layout.) */
+.pane-bottom {
+  height: 16px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.pane-resize {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 16px; height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 38%, rgba(255,255,255,0.22) 40%, rgba(255,255,255,0.22) 46%, transparent 48%,
+    transparent 58%, rgba(255,255,255,0.22) 60%, rgba(255,255,255,0.22) 66%, transparent 68%);
+  touch-action: none;
+}
 
 /* ── Modal ─────────────────────────────────────────────────────────────── */
 
